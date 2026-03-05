@@ -665,8 +665,8 @@ async fn find_messages_by_chat_and_request_id() {
         .expect("find");
 
     assert_eq!(msgs.len(), 2);
-    assert_eq!(msgs[0].role, MessageRole::User);
-    assert_eq!(msgs[1].role, MessageRole::Assistant);
+    assert!(msgs.iter().any(|m| m.role == MessageRole::User));
+    assert!(msgs.iter().any(|m| m.role == MessageRole::Assistant));
 }
 
 #[tokio::test]

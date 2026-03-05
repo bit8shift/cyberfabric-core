@@ -66,6 +66,7 @@ impl<QR: QuotaUsageRepository> QuotaService<QR> {
 
 // ── Cascade types ──
 
+#[domain_model]
 struct CascadeContext<'a> {
     snapshot: &'a PolicySnapshot,
     user_limits: &'a UserLimits,
@@ -74,6 +75,7 @@ struct CascadeContext<'a> {
     periods: &'a [(PeriodType, time::Date)],
 }
 
+#[domain_model]
 enum CascadeDecision {
     Allow {
         effective_model: String,
@@ -508,9 +510,9 @@ impl<QR: QuotaUsageRepository> QuotaService<QR> {
     }
 
     fn validate_settlement_input(input: &SettlementInput) -> Result<(), DomainError> {
-        if input.reserve_tokens < 0 {
+        if input.reserve_tokens <= 0 {
             return Err(DomainError::internal(
-                "invalid settlement input: negative reserve_tokens",
+                "invalid settlement input: reserve_tokens must be positive",
             ));
         }
         if input.max_output_tokens_applied < 0 {

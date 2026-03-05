@@ -4,6 +4,7 @@
 //! the domain service layer. Axum-specific SSE conversion lives in
 //! `api::rest::sse`.
 
+use modkit_macros::domain_model;
 use serde::Serialize;
 use utoipa::ToSchema;
 
@@ -17,6 +18,7 @@ use crate::infra::llm::{Citation, ToolPhase, Usage};
 ///
 /// Each variant maps to a distinct SSE `event:` name and `data:` JSON payload.
 /// Ordering grammar: `ping* (delta | tool)* citations? (done | error)`.
+#[domain_model]
 #[derive(Debug, Clone, ToSchema)]
 pub enum StreamEvent {
     Ping,
@@ -28,6 +30,7 @@ pub enum StreamEvent {
 }
 
 /// Delta text chunk.
+#[domain_model]
 #[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct DeltaData {
     pub r#type: &'static str,
@@ -35,6 +38,7 @@ pub struct DeltaData {
 }
 
 /// Tool lifecycle event.
+#[domain_model]
 #[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct ToolData {
     pub phase: ToolPhase,
@@ -43,12 +47,14 @@ pub struct ToolData {
 }
 
 /// Citations from provider annotations.
+#[domain_model]
 #[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct CitationsData {
     pub items: Vec<Citation>,
 }
 
 /// Successful stream completion.
+#[domain_model]
 #[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct DoneData {
     pub message_id: Option<String>,
@@ -63,6 +69,7 @@ pub struct DoneData {
 }
 
 /// Stream error (terminal).
+#[domain_model]
 #[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct ErrorData {
     pub code: String,
@@ -74,6 +81,7 @@ pub struct ErrorData {
 // ════════════════════════════════════════════════════════════════════════════
 
 /// Coarse event classification for ordering enforcement.
+#[domain_model]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StreamEventKind {
     Ping,

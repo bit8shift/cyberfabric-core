@@ -1,9 +1,12 @@
 // Called from QuotaService which is not yet wired into the turn handler.
 // Remove `dead_code` allows once QuotaService is live.
 
+use modkit_macros::domain_model;
+
 use crate::config::EstimationBudgets;
 
 /// Input to the token estimation function.
+#[domain_model]
 #[allow(dead_code)]
 pub struct EstimationInput {
     pub utf8_bytes: u64,
@@ -14,6 +17,7 @@ pub struct EstimationInput {
 }
 
 /// Result of token estimation.
+#[domain_model]
 #[allow(dead_code)]
 pub struct EstimationResult {
     pub estimated_input_tokens: u64,

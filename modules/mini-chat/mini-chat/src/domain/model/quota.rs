@@ -1,8 +1,10 @@
+use modkit_macros::domain_model;
 use uuid::Uuid;
 
 use crate::infra::db::entity::quota_usage::PeriodType;
 
 /// Result of preflight reserve evaluation.
+#[domain_model]
 #[derive(Debug, Clone)]
 pub enum PreflightDecision {
     Allow {
@@ -31,6 +33,7 @@ pub enum PreflightDecision {
 }
 
 /// Reason a turn was downgraded from the selected model/tier.
+#[domain_model]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DowngradeReason {
     PremiumQuotaExhausted,
@@ -52,6 +55,7 @@ impl DowngradeReason {
 }
 
 /// Result of quota settlement.
+#[domain_model]
 #[derive(Debug, Clone)]
 pub struct SettlementOutcome {
     pub settlement_method: SettlementMethod,
@@ -61,6 +65,7 @@ pub struct SettlementOutcome {
 }
 
 /// Which settlement path was used.
+#[domain_model]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettlementMethod {
     Actual,
@@ -69,6 +74,7 @@ pub enum SettlementMethod {
 }
 
 /// Input to `preflight_reserve()`.
+#[domain_model]
 pub struct PreflightInput {
     pub tenant_id: Uuid,
     pub user_id: Uuid,
@@ -81,6 +87,7 @@ pub struct PreflightInput {
 }
 
 /// Input to `settle()`.
+#[domain_model]
 pub struct SettlementInput {
     pub tenant_id: Uuid,
     pub user_id: Uuid,
@@ -95,6 +102,7 @@ pub struct SettlementInput {
 }
 
 /// Classification of the settlement path to take.
+#[domain_model]
 pub enum SettlementPath {
     /// Provider reported actual usage.
     Actual {

@@ -1,6 +1,8 @@
 // Called from QuotaService which is not yet wired into the turn handler.
 // Remove `dead_code` allows once QuotaService is live.
 
+use modkit_macros::domain_model;
+
 #[allow(dead_code)]
 /// Maximum tokens accepted by credit arithmetic (10 million).
 pub const MAX_TOKENS: u64 = 10_000_000;
@@ -12,6 +14,7 @@ pub const MAX_MULT: u64 = 10_000_000_000;
 pub const DIVISOR: u64 = 1_000_000;
 
 /// Error returned when credit arithmetic overflows safe bounds.
+#[domain_model]
 #[allow(dead_code, clippy::enum_variant_names)]
 #[derive(Debug, thiserror::Error)]
 pub enum CreditOverflowError {
@@ -28,7 +31,8 @@ pub enum CreditOverflowError {
 /// Returns 0 when `a == 0`.
 #[allow(dead_code, clippy::integer_division)]
 pub fn ceil_div_checked(a: u64, b: u64) -> Result<u64, CreditOverflowError> {
-    if a == 0 {
+    debug_assert!(b != 0, "ceil_div_checked: divisor must be non-zero");
+    if a == 0 || b == 0 {
         return Ok(0);
     }
     a.checked_add(b - 1)
