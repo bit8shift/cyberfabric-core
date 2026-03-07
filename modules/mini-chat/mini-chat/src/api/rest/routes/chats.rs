@@ -5,6 +5,8 @@ use modkit::api::operation_builder::OperationBuilder;
 use super::AiChatLicense;
 use crate::api::rest::{dto, handlers};
 
+const API_TAG: &str = "Mini Chat Chats";
+
 pub(super) fn register_chat_routes(
     mut router: Router,
     openapi: &dyn OpenApiRegistry,
@@ -14,7 +16,7 @@ pub(super) fn register_chat_routes(
     router = OperationBuilder::post(format!("{prefix}/v1/chats"))
         .operation_id("mini_chat.create_chat")
         .summary("Create a new chat")
-        .tag("chats")
+        .tag(API_TAG)
         .authenticated()
         .require_license_features([&AiChatLicense])
         .json_request::<dto::CreateChatReq>(openapi, "Chat creation data")
@@ -34,7 +36,7 @@ pub(super) fn register_chat_routes(
     router = OperationBuilder::get(format!("{prefix}/v1/chats"))
         .operation_id("mini_chat.list_chats")
         .summary("List chats for the current user")
-        .tag("chats")
+        .tag(API_TAG)
         .authenticated()
         .require_license_features([&AiChatLicense])
         .query_param_typed(
@@ -60,7 +62,7 @@ pub(super) fn register_chat_routes(
     router = OperationBuilder::get(format!("{prefix}/v1/chats/{{id}}"))
         .operation_id("mini_chat.get_chat")
         .summary("Get a chat by ID")
-        .tag("chats")
+        .tag(API_TAG)
         .authenticated()
         .require_license_features([&AiChatLicense])
         .path_param("id", "Chat UUID")
@@ -81,7 +83,7 @@ pub(super) fn register_chat_routes(
     router = OperationBuilder::patch(format!("{prefix}/v1/chats/{{id}}"))
         .operation_id("mini_chat.update_chat")
         .summary("Update a chat title")
-        .tag("chats")
+        .tag(API_TAG)
         .authenticated()
         .require_license_features([&AiChatLicense])
         .path_param("id", "Chat UUID")
@@ -103,7 +105,7 @@ pub(super) fn register_chat_routes(
     router = OperationBuilder::delete(format!("{prefix}/v1/chats/{{id}}"))
         .operation_id("mini_chat.delete_chat")
         .summary("Delete a chat")
-        .tag("chats")
+        .tag(API_TAG)
         .authenticated()
         .require_license_features([&AiChatLicense])
         .path_param("id", "Chat UUID")

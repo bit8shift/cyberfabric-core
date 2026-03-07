@@ -104,6 +104,7 @@ impl OpenApiRegistryImpl {
     ///
     /// # Errors
     /// Returns an error if the `OpenAPI` specification cannot be built.
+    #[allow(unknown_lints, de0205_operation_builder_tag)]
     pub fn build_openapi(&self, info: &OpenApiInfo) -> Result<OpenApi> {
         use http::Method;
 
