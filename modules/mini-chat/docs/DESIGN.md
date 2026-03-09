@@ -2303,13 +2303,7 @@ PATCH MUST NOT introduce a separate execution path for settlement or outbox emis
 
 **Request body**: none
 
-**Response** (success): `200 OK` with (`chat_id` omitted — already in URL path):
-```json
-{
-  "request_id": "uuid",
-  "deleted": true
-}
-```
+**Response** (success): `204 No Content` (no body).
 
 **Errors**: same as retry (except no streaming).
 

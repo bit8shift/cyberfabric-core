@@ -101,29 +101,19 @@ pub(crate) async fn get_turn(
 // DELETE turn
 // ════════════════════════════════════════════════════════════════════════════
 
-#[derive(Debug, Serialize, ToSchema)]
-pub(crate) struct DeleteTurnResponse {
-    request_id: uuid::Uuid,
-    deleted: bool,
-}
-
 /// DELETE /mini-chat/v1/chats/{id}/turns/{request_id}
 #[tracing::instrument(skip(svc, ctx), fields(chat_id = %chat_id, turn_request_id = %request_id))]
 pub(crate) async fn delete_turn(
     Extension(ctx): Extension<SecurityContext>,
     Extension(svc): Extension<Arc<AppServices>>,
     Path((chat_id, request_id)): Path<(uuid::Uuid, uuid::Uuid)>,
-) -> ApiResult<Json<DeleteTurnResponse>> {
-    let result = svc
-        .turns
+) -> ApiResult<impl IntoResponse> {
+    svc.turns
         .delete(&ctx, chat_id, request_id)
         .await
         .map_err(|e| mutation_error_to_problem(&e))?;
 
-    Ok(Json(DeleteTurnResponse {
-        request_id: result.request_id,
-        deleted: result.deleted,
-    }))
+    Ok(no_content().into_response())
 }
 
 // ════════════════════════════════════════════════════════════════════════════

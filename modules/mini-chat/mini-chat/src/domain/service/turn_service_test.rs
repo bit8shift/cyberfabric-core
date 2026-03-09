@@ -304,7 +304,7 @@ async fn delete_non_latest_turn_returns_not_latest() {
 // ════════════════════════════════════════════════════════════════════════════
 
 #[tokio::test]
-async fn delete_success_returns_request_id_and_deleted_true() {
+async fn delete_success_soft_deletes_turn() {
     let (svc, ctx, chat_id, tenant_id) = setup().await;
 
     let request_id = create_completed_turn(
@@ -317,9 +317,7 @@ async fn delete_success_returns_request_id_and_deleted_true() {
     )
     .await;
 
-    let result = svc.delete(&ctx, chat_id, request_id).await.unwrap();
-    assert_eq!(result.request_id, request_id);
-    assert!(result.deleted);
+    svc.delete(&ctx, chat_id, request_id).await.unwrap();
 
     // Verify the turn is soft-deleted (deleted_at != NULL)
     let scope = AccessScope::for_tenant(tenant_id);

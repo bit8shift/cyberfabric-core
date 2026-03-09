@@ -66,13 +66,6 @@ impl std::error::Error for MutationError {}
 // Results
 // ════════════════════════════════════════════════════════════════════════════
 
-#[domain_model]
-#[derive(Debug)]
-pub struct DeleteResult {
-    pub request_id: Uuid,
-    pub deleted: bool,
-}
-
 /// Returned from retry/edit. Contains everything the handler needs to
 /// set up streaming via `StreamService::run_stream_for_mutation()`.
 #[domain_model]
@@ -126,7 +119,7 @@ impl<TR: TurnRepository + 'static, MR: MessageRepository + 'static, CR: ChatRepo
         ctx: &SecurityContext,
         chat_id: Uuid,
         request_id: Uuid,
-    ) -> Result<DeleteResult, MutationError> {
+    ) -> Result<(), MutationError> {
         info!(%chat_id, %request_id, "turn delete");
 
         let turn_repo = Arc::clone(&self.turn_repo);
@@ -154,10 +147,7 @@ impl<TR: TurnRepository + 'static, MR: MessageRepository + 'static, CR: ChatRepo
                         .await
                         .map_err(|e| modkit_db::DbError::Other(anyhow::Error::new(e)))?;
 
-                    Ok(DeleteResult {
-                        request_id,
-                        deleted: true,
-                    })
+                    Ok(())
                 })
             })
             .await

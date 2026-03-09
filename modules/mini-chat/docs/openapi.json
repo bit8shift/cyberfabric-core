@@ -794,19 +794,8 @@
         "summary": "Delete the last turn",
         "description": "Soft-deletes the most recent turn (user message + assistant response). Only the latest non-deleted turn in a terminal state may be deleted. No replacement turn is created.",
         "responses": {
-          "200": {
-            "description": "Turn deleted.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/TurnDeleteResponse"
-                },
-                "example": {
-                  "request_id": "f47ac10b-58cc-4372-a567-0e02b2c3d479",
-                  "deleted": true
-                }
-              }
-            }
+          "204": {
+            "description": "Turn deleted."
           },
           "400": {
             "description": "Turn not in terminal state. Code: `invalid_turn_state`.",
@@ -1453,20 +1442,6 @@
           "updated_at": {
             "type": "string",
             "format": "date-time"
-          }
-        }
-      },
-      "TurnDeleteResponse": {
-        "type": "object",
-        "required": ["request_id", "deleted"],
-        "properties": {
-          "request_id": {
-            "type": "string",
-            "format": "uuid"
-          },
-          "deleted": {
-            "type": "boolean",
-            "const": true
           }
         }
       },
