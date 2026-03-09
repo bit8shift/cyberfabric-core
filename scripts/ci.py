@@ -272,7 +272,11 @@ def wait_for_health(
                 _print_log_file(output_log, "server stdout")
                 _print_log_file(error_log, "server stderr")
                 print("Fix the error above, rebuild with:")
-                print("  make build")
+                e2e_features = read_e2e_features()
+                rebuild_cmd = "  cargo +stable build --release --bin hyperspot-server"
+                if e2e_features:
+                    rebuild_cmd += f" --features {e2e_features}"
+                print(rebuild_cmd)
                 print("Then re-run: make e2e-local")
                 sys.exit(1)
 
@@ -398,7 +402,11 @@ def cmd_e2e(args):
 
         # Build all required modules and binaries using project build orchestration
         step("Building release artifacts for local E2E")
-        run_cmd(["make", "build"])
+        e2e_features = read_e2e_features()
+        cargo_cmd = ["cargo", "+stable", "build", "--release", "--bin", "hyperspot-server"]
+        if e2e_features:
+            cargo_cmd.extend(["--features", e2e_features])
+        run_cmd(cargo_cmd)
 
         # Use the release binary produced by build
         release_bin = str(find_binary(
@@ -408,7 +416,11 @@ def cmd_e2e(args):
         if not os.path.isfile(release_bin):
             print(f"\nERROR: Release binary not found at: {release_bin}")
             print("Build it first with:")
-            print("  make build")
+            e2e_features = read_e2e_features()
+            rebuild_cmd = "  cargo +stable build --release --bin hyperspot-server"
+            if e2e_features:
+                rebuild_cmd += f" --features {e2e_features}"
+            print(rebuild_cmd)
             sys.exit(1)
 
         # Create logs directory if it doesn't exist
