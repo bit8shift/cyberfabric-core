@@ -116,7 +116,7 @@ peg::parser! {
 
         /// Parses a numeric value.
         rule number_value() -> Result<Value, ParseError>
-            = n:$(['0'..='9']+ ("." ['0'..='9']*)?) { Ok(Value::Number(BigDecimal::from_str(n).map_err(|_| ParseError::ParsingNumber)?)) }
+            = n:$(['+' | '-']? ['0'..='9']+ ("." ['0'..='9']*)?) { Ok(Value::Number(BigDecimal::from_str(n).map_err(|_| ParseError::ParsingNumber)?)) }
 
         /// Parses a uuid value.
         rule uuid_value() -> Result<Value, ParseError>

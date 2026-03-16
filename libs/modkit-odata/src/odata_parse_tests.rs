@@ -107,6 +107,39 @@ fn number_value() {
 }
 
 #[test]
+fn signed_number_value() {
+    let filter = "temperature gt -10 and offset eq +5 and delta lt -3.14";
+    let result = parse_str(filter).expect("valid filter tree");
+
+    assert_eq!(
+        result,
+        Expr::And(
+            Expr::And(
+                Expr::Compare(
+                    Expr::Identifier("temperature".to_owned()).into(),
+                    GreaterThan,
+                    Expr::Value(Value::Number(BigDecimal::from_str("-10").unwrap())).into()
+                )
+                .into(),
+                Expr::Compare(
+                    Expr::Identifier("offset".to_owned()).into(),
+                    Equal,
+                    Expr::Value(Value::Number(BigDecimal::from_str("+5").unwrap())).into()
+                )
+                .into()
+            )
+            .into(),
+            Expr::Compare(
+                Expr::Identifier("delta".to_owned()).into(),
+                LessThan,
+                Expr::Value(Value::Number(BigDecimal::from_str("-3.14").unwrap())).into()
+            )
+            .into()
+        )
+    );
+}
+
+#[test]
 fn date_value() {
     let filter = "birthdate eq 2024-06-24";
     let result = parse_str(filter).expect("valid filter tree");
