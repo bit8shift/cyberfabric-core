@@ -102,6 +102,9 @@ pub struct MutationResult {
     /// Snapshot boundary computed before the new user message was persisted.
     /// Ensures deterministic context assembly (DESIGN `§ContextPlan` Determinism P1).
     pub snapshot_boundary: Option<crate::domain::repos::SnapshotBoundary>,
+    /// Chat model carried from the mutation transaction so the handler can
+    /// resolve the provider without a redundant DB round-trip.
+    pub chat_model: String,
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -220,7 +223,7 @@ impl<
             .db
             .transaction(|tx| {
                 Box::pin(async move {
-                    let (scope, target) = validate_mutation(
+                    let (scope, target, _chat_model) = validate_mutation(
                         &*chat_repo,
                         &*turn_repo,
                         &scope_tx,
@@ -331,11 +334,11 @@ impl<
         let scope_tx = chat_scope.clone();
         let ctx_clone = ctx.clone();
 
-        let (user_content, snapshot_boundary) = self
+        let (user_content, snapshot_boundary, chat_model) = self
             .db
             .transaction(|tx| {
                 Box::pin(async move {
-                    let (scope, target) = validate_mutation(
+                    let (scope, target, chat_model) = validate_mutation(
                         &*chat_repo,
                         &*turn_repo,
                         &scope_tx,
@@ -433,7 +436,7 @@ impl<
                         .await
                         .map_err(|e| modkit_db::DbError::Other(anyhow::Error::new(e)))?;
 
-                    Ok((user_content, boundary))
+                    Ok((user_content, boundary, chat_model))
                 })
             })
             .await
@@ -444,6 +447,7 @@ impl<
             new_turn_id,
             user_content,
             snapshot_boundary,
+            chat_model,
         })
     }
 }
@@ -460,15 +464,16 @@ async fn validate_mutation<CR: ChatRepository, TR: TurnRepository>(
     tx: &impl modkit_db::secure::DBRunner,
     chat_id: Uuid,
     request_id: Uuid,
-) -> Result<(AccessScope, TurnModel), MutationError> {
+) -> Result<(AccessScope, TurnModel, String), MutationError> {
     // 1. Verify chat exists with pre-computed authorization scope
-    chat_repo
+    let chat = chat_repo
         .get(tx, chat_scope, chat_id)
         .await
         .map_err(|e| MutationError::Internal {
             message: e.to_string(),
         })?
         .ok_or(MutationError::ChatNotFound { chat_id })?;
+    let chat_model = chat.model;
 
     let scope = chat_scope.tenant_only();
 
@@ -509,7 +514,7 @@ async fn validate_mutation<CR: ChatRepository, TR: TurnRepository>(
         _ => return Err(MutationError::NotLatestTurn),
     }
 
-    Ok((scope, target))
+    Ok((scope, target, chat_model))
 }
 
 // ════════════════════════════════════════════════════════════════════════════

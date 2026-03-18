@@ -320,7 +320,7 @@ impl<QR: QuotaUsageRepository> QuotaService<QR> {
                     catalog
                         .iter()
                         .filter(|m| tier_matches(m))
-                        .find(|m| m.preference.is_default)
+                        .find(|m| m.preference.as_ref().is_some_and(|p| p.is_default))
                 })
                 .or_else(|| catalog.iter().find(|m| tier_matches(m)));
 
