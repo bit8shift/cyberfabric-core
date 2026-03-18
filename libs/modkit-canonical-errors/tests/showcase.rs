@@ -238,7 +238,9 @@ fn showcase_out_of_range() {
 fn showcase_permission_denied() {
     cf_modkit_errors::resource_error!(TenantResourceError, "gts.cf.core.tenants.tenant.v1~");
 
-    let err = TenantResourceError::permission_denied().create();
+    let err = TenantResourceError::permission_denied()
+        .with_reason("CROSS_TENANT_ACCESS")
+        .create();
     let problem = Problem::from(err);
     let json = serde_json::to_value(&problem).unwrap();
 
@@ -250,7 +252,8 @@ fn showcase_permission_denied() {
             "status": 403,
             "detail": "You do not have permission to perform this operation",
             "context": {
-                "resource_type": "gts.cf.core.tenants.tenant.v1~"
+                "resource_type": "gts.cf.core.tenants.tenant.v1~",
+                "reason": "CROSS_TENANT_ACCESS"
             }
         })
     );

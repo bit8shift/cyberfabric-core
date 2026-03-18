@@ -284,7 +284,7 @@ impl ResourceErrorBuilder<ResourceOptional, NoContext> {
     }
 }
 
-impl ResourceErrorBuilder<ResourceAbsent, NoContext> {
+impl ResourceErrorBuilder<ResourceAbsent, NeedsReason> {
     #[doc(hidden)]
     pub fn __permission_denied(resource_type: &'static str, detail: impl Into<String>) -> Self {
         ResourceErrorBuilder {
@@ -292,11 +292,13 @@ impl ResourceErrorBuilder<ResourceAbsent, NoContext> {
             detail: detail.into(),
             variant: ErrorVariant::PermissionDenied,
             resource: ResourceAbsent,
-            context: NoContext,
+            context: NeedsReason,
             reason: None,
         }
     }
+}
 
+impl ResourceErrorBuilder<ResourceAbsent, NoContext> {
     #[doc(hidden)]
     pub fn __cancelled(resource_type: &'static str, detail: impl Into<String>) -> Self {
         ResourceErrorBuilder {
@@ -639,9 +641,9 @@ where
             ErrorVariant::DeadlineExceeded => {
                 CanonicalError::__deadline_exceeded(DeadlineExceeded::new())
             }
-            ErrorVariant::PermissionDenied => {
-                CanonicalError::__permission_denied(PermissionDenied::new())
-            }
+            ErrorVariant::PermissionDenied => CanonicalError::__permission_denied(
+                PermissionDenied::new(self.reason.as_deref().unwrap_or("")),
+            ),
             ErrorVariant::InvalidArgument => {
                 let ctx = if let Some(fmt) = ctx_data.format_message {
                     InvalidArgument::format(fmt)

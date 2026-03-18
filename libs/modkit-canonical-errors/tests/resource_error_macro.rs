@@ -26,7 +26,9 @@ fn macro_not_found_has_correct_resource_type_and_resource_info() {
 fn macro_permission_denied_has_correct_resource_type() {
     cf_modkit_errors::resource_error!(TestUserResourceError, "gts.cf.core.users.user.v1~");
 
-    let err = TestUserResourceError::permission_denied().create();
+    let err = TestUserResourceError::permission_denied()
+        .with_reason("INSUFFICIENT_ROLE")
+        .create();
     assert_eq!(err.resource_type(), Some("gts.cf.core.users.user.v1~"));
     assert_eq!(
         err.gts_type(),

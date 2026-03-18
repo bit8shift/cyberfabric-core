@@ -106,9 +106,10 @@ fn already_exists_serialization() {
 
 #[test]
 fn permission_denied_serialization() {
-    let ctx = PermissionDenied::new();
+    let ctx = PermissionDenied::new("CROSS_TENANT_ACCESS");
     let json = serde_json::to_value(&ctx).unwrap();
     assert!(json.is_object());
+    assert_eq!(json["reason"], "CROSS_TENANT_ACCESS");
 }
 
 #[test]

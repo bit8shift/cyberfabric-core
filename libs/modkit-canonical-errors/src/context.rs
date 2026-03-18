@@ -193,19 +193,16 @@ impl AlreadyExists {
 
 // 07 PermissionDenied — context: PermissionDenied
 #[derive(Debug, Clone, Serialize)]
-#[allow(clippy::empty_structs_with_brackets)]
-pub struct PermissionDenied {}
+pub struct PermissionDenied {
+    pub reason: String,
+}
 
 impl PermissionDenied {
     #[must_use]
-    pub fn new() -> Self {
-        Self {}
-    }
-}
-
-impl Default for PermissionDenied {
-    fn default() -> Self {
-        Self::new()
+    pub fn new(reason: impl Into<String>) -> Self {
+        Self {
+            reason: reason.into(),
+        }
     }
 }
 

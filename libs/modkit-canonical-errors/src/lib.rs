@@ -109,7 +109,7 @@ macro_rules! resource_error {
             $vis fn permission_denied()
                 -> $crate::ResourceErrorBuilder<
                     $crate::builder::ResourceAbsent,
-                    $crate::builder::NoContext,
+                    $crate::builder::NeedsReason,
                 >
             {
                 $crate::ResourceErrorBuilder::__permission_denied($gts_type, "You do not have permission to perform this operation")

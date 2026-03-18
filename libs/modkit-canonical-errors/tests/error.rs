@@ -67,7 +67,9 @@ fn all_16_categories_convert_to_problem() {
         R::already_exists("Resource already exists")
             .with_resource("user-123")
             .create(),
-        R::permission_denied().create(),
+        R::permission_denied()
+            .with_reason("INSUFFICIENT_ROLE")
+            .create(),
         R::resource_exhausted("Quota exceeded")
             .with_quota_violation("requests", "limit reached")
             .create(),
@@ -170,7 +172,9 @@ fn validate_all_gts_ids() {
         R::already_exists("exists")
             .with_resource("user-123")
             .create(),
-        R::permission_denied().create(),
+        R::permission_denied()
+            .with_reason("INSUFFICIENT_ROLE")
+            .create(),
         R::resource_exhausted("quota")
             .with_quota_violation("req", "limit")
             .create(),
