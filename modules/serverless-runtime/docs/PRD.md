@@ -1,6 +1,70 @@
 <!-- cpt:#:prd -->
 # PRD
 
+
+<!-- toc -->
+
+- [1. Overview](#1-overview)
+  - [Purpose](#purpose)
+  - [Background / Problem Statement](#background--problem-statement)
+  - [Goals (Business Outcomes)](#goals-business-outcomes)
+  - [Glossary](#glossary)
+- [2. Actors](#2-actors)
+  - [Human Actors](#human-actors)
+  - [System Actors](#system-actors)
+- [Operational Concept & Environment](#operational-concept--environment)
+- [Scope](#scope)
+  - [In Scope](#in-scope)
+  - [Out of Scope](#out-of-scope)
+- [3. Functional Requirements](#3-functional-requirements)
+  - [FR-001 Runtime Authoring and Definition Management](#fr-001-runtime-authoring-and-definition-management)
+  - [FR-002 Tenant-Isolated Registry and Access Control](#fr-002-tenant-isolated-registry-and-access-control)
+  - [FR-003 Execution Engine and Durability](#fr-003-execution-engine-and-durability)
+  - [FR-004 Trigger and Schedule Management](#fr-004-trigger-and-schedule-management)
+  - [FR-005 Runtime Capabilities and Adapter Integration](#fr-005-runtime-capabilities-and-adapter-integration)
+  - [FR-006 Execution Lifecycle and Resilience](#fr-006-execution-lifecycle-and-resilience)
+  - [FR-007 Execution Visibility and Querying](#fr-007-execution-visibility-and-querying)
+  - [FR-008 Input Validation and Security Enforcement](#fr-008-input-validation-and-security-enforcement)
+  - [FR-009 Debugging and Operational Tooling](#fr-009-debugging-and-operational-tooling)
+  - [FR-010 Advanced Execution Patterns](#fr-010-advanced-execution-patterns)
+  - [FR-011 Governance, Sharing, and Notifications](#fr-011-governance-sharing-and-notifications)
+  - [FR-012 Execution Replay and Visualization](#fr-012-execution-replay-and-visualization)
+  - [FR-013 Advanced Deployment and Portability](#fr-013-advanced-deployment-and-portability)
+  - [FR-014 Deployment Safety](#fr-014-deployment-safety)
+  - [FR-015 LLM Agent Integration](#fr-015-llm-agent-integration)
+- [4. Non-Functional Requirements](#4-non-functional-requirements)
+  - [Security and Access Control](#security-and-access-control)
+  - [Resource Governance](#resource-governance)
+  - [Reliability and State Consistency](#reliability-and-state-consistency)
+  - [Operational Traceability](#operational-traceability)
+  - [Observability and Metrics](#observability-and-metrics)
+  - [Retention and Compliance](#retention-and-compliance)
+  - [Performance](#performance)
+  - [Composition Dependencies](#composition-dependencies)
+  - [Scalability](#scalability)
+  - [Tenant Isolation](#tenant-isolation)
+  - [Intentional Exclusions](#intentional-exclusions)
+- [Public Library Interfaces](#public-library-interfaces)
+- [5. Use Cases](#5-use-cases)
+  - [UC-001 Resource Provisioning with Rollback](#uc-001-resource-provisioning-with-rollback)
+  - [UC-002 Tenant Onboarding with External Approvals](#uc-002-tenant-onboarding-with-external-approvals)
+  - [UC-003 Subscription Lifecycle Management](#uc-003-subscription-lifecycle-management)
+  - [UC-004 Policy Enforcement and Remediation](#uc-004-policy-enforcement-and-remediation)
+  - [UC-005 Adapter Hot-Plug Registration](#uc-005-adapter-hot-plug-registration)
+  - [UC-006 Debugging a Failed Workflow Execution](#uc-006-debugging-a-failed-workflow-execution)
+  - [UC-007 Data Migration with Checkpoint/Resume](#uc-007-data-migration-with-checkpointresume)
+- [Acceptance Criteria](#acceptance-criteria)
+- [Dependencies](#dependencies)
+- [Assumptions](#assumptions)
+- [Risks](#risks)
+- [Open Questions](#open-questions)
+- [6. Non-Goals](#6-non-goals)
+- [7. Additional context](#7-additional-context)
+  - [Target Use Cases](#target-use-cases)
+  - [BR-to-Cypilot ID Cross-Reference](#br-to-cypilot-id-cross-reference)
+
+<!-- /toc -->
+
 <!-- cpt:##:overview -->
 ## 1. Overview
 
@@ -58,6 +122,7 @@ The platform requires a unified way to automate long-running and multi-step busi
 - Rich operational tooling: execution visibility, debugging, audit trails, and observability
 - Built-in support for saga/compensation patterns and idempotency mechanisms
 - Infrastructure adapter integration with hot-plug registration and hot (re)loading of native modules
+- LLM agent integration via MCP (Model Context Protocol) with JSON-RPC 2.0 function invocation, elicitation for human-in-the-loop input, and sampling for LLM-completion-during-execution
 <!-- cpt:list:capabilities -->
 
 ### Glossary
@@ -70,7 +135,7 @@ The platform requires a unified way to automate long-running and multi-step busi
 | **Function** | A single unit of custom logic that can be invoked independently or as part of a workflow. |
 | **Callable Base Type** | Unified base type for all callable entities (functions and workflows); a registered definition that can be invoked via the runtime API. Workflows extend this base with additional traits. |
 | **Function Definition** | Canonical definition for a function using a GTS-identified JSON Schema with pinned params/returns/errors and traits. |
-| **Invocation Mode** | Execution mode for a function: `sync` (caller waits for result) or `async` (caller receives an invocation id and polls for status). |
+| **Invocation Mode** | Execution mode for a function: `sync` (caller waits for result), `async` (caller receives an invocation id and polls for status), or `stream` (caller receives server-pushed events/results over SSE). |
 | **Compensation** | A rollback action that reverses the effect of previously completed steps when a workflow fails (saga pattern). |
 | **Scheduled Workflow** | A workflow that executes on a recurring schedule (periodic/cron-based). |
 | **Infrastructure Adapter** | A modular component that integrates external infrastructure (clouds, on-prem systems) and can provide adapter-specific workflow definitions. |
@@ -83,6 +148,11 @@ The platform requires a unified way to automate long-running and multi-step busi
 | **RTO** | Recovery Time Objective — the maximum acceptable time to restore service after a failure. |
 | **RPO** | Recovery Point Objective — the maximum acceptable amount of data loss measured in time. |
 | **TTL** | Time To Live — the duration for which a cached result remains valid before expiring. |
+| **MCP (Model Context Protocol)** | A JSON-RPC 2.0-based protocol for exposing callable tools to LLM agents; defines `tools/list` (enumerate available tools with JSON Schema descriptions) and `tools/call` (invoke a tool) operations with SSE streaming, elicitation, and sampling support. |
+| **JSON-RPC 2.0** | A lightweight remote procedure call protocol using `{method, params}` request and `{result \| error}` response objects; maps directly onto function invocation without the HTTP resource-centric translation required by REST. |
+| **Elicitation** | An MCP protocol capability (`elicitation/create`) that allows a function to pause execution and request human input from the agent client, delivered inline on the active SSE stream. |
+| **Sampling** | An MCP protocol capability (`sampling/createMessage`) that allows a function to request an LLM completion from the agent client during execution, enabling model-in-the-loop automation patterns. |
+| **LLM Agent** | An AI agent system (such as Claude, GPT, or a LangGraph agent) that uses LLM reasoning to discover and invoke tools via the MCP protocol. |
 
 <!-- cpt:##:overview -->
 
@@ -213,6 +283,18 @@ The platform requires a unified way to automate long-running and multi-step busi
 <!-- cpt:id:actor -->
 <!-- cpt:####:actor-title repeat="many" -->
 
+<!-- cpt:####:actor-title repeat="many" -->
+#### LLM Agent
+
+<!-- cpt:id:actor -->
+**ID**: `cpt-cf-serverless-runtime-actor-llm-agent`
+
+<!-- cpt:paragraph:actor-role -->
+**Role**: An AI agent system (such as Claude, GPT, or a LangGraph agent) that connects to the serverless runtime via the MCP server endpoint to discover available functions as tools and invoke them on behalf of users or automated workflows. Initiates MCP sessions, issues `tools/list` to enumerate available functions, and issues `tools/call` to invoke them. May receive elicitation requests (requiring human input) and sampling requests (requesting LLM completions) from executing functions via the SSE stream.
+<!-- cpt:paragraph:actor-role -->
+<!-- cpt:id:actor -->
+<!-- cpt:####:actor-title repeat="many" -->
+
 <!-- cpt:##:actors -->
 
 ## Operational Concept & Environment
@@ -228,7 +310,7 @@ The Serverless Runtime operates as a module within the CyberFabric modular monol
 ### In Scope
 
 - Runtime creation, modification, versioning, and registration of functions and workflows
-- Unified function invocation surface (sync and async modes)
+- Unified function invocation surface: sync/async via REST, and stream mode via JSON-RPC 2.0 and MCP protocol surfaces
 - Tenant-isolated registry with ownership scoping (user/tenant/system)
 - Long-running durable execution with checkpointing and suspend/resume
 - Schedule-based, API-triggered, event-driven, and internal invocation triggers
@@ -589,6 +671,31 @@ The system supports blue-green deployment strategies for workflow/function updat
 **Actors**:
 <!-- cpt:id-ref:actor -->
 `cpt-cf-serverless-runtime-actor-tenant-admin`, `cpt-cf-serverless-runtime-actor-platform-operator`
+<!-- cpt:id-ref:actor -->
+<!-- cpt:id:fr -->
+<!-- cpt:###:fr-title repeat="many" -->
+
+<!-- cpt:###:fr-title repeat="many" -->
+### FR-015 LLM Agent Integration
+
+<!-- cpt:id:fr has="priority,task" covered_by="DESIGN,DECOMPOSITION,SPEC" -->
+- [ ] `p1` - **ID**: `cpt-cf-serverless-runtime-fr-llm-agent-integration`
+
+<!-- cpt:free:fr-summary -->
+The system provides a JSON-RPC 2.0 endpoint that enables callers to invoke functions using a generalized `{method, params}` request format, removing the REST resource-centric translation overhead for callers that reason in terms of named function calls with typed inputs and outputs. Functions must opt in to JSON-RPC exposure via their definition (BR-209).
+
+The system provides an MCP (Model Context Protocol) server endpoint that enables LLM agent clients to discover registered functions as MCP tools and invoke them using the `tools/list` and `tools/call` protocol operations. The MCP server uses SSE streaming transport and complies with the MCP specification. Functions must opt in to MCP exposure via their definition (BR-210).
+
+Functions exposed via the MCP server may request human input from the agent client during execution using the MCP elicitation protocol (`elicitation/create`), pausing execution and delivering an elicitation request inline on the active SSE stream. Elicitation capability must be declared in the function definition and requires streaming mode (BR-211).
+
+Functions exposed via the MCP server may request LLM completions from the agent client during execution using the MCP sampling protocol (`sampling/createMessage`), enabling model-in-the-loop automation patterns where the function delegates reasoning steps to the connected LLM. Sampling capability must be declared in the function definition and requires streaming mode (BR-212).
+
+Both the JSON-RPC 2.0 and MCP surfaces delegate to the same Invocation Engine as the REST API, ensuring consistent authentication, authorization, quota enforcement, schema validation, and execution lifecycle management across all invocation surfaces.
+<!-- cpt:free:fr-summary -->
+
+**Actors**:
+<!-- cpt:id-ref:actor -->
+`cpt-cf-serverless-runtime-actor-llm-agent`, `cpt-cf-serverless-runtime-actor-app-developer`, `cpt-cf-serverless-runtime-actor-tenant-admin`
 <!-- cpt:id-ref:actor -->
 <!-- cpt:id:fr -->
 <!-- cpt:###:fr-title repeat="many" -->
@@ -1197,6 +1304,7 @@ This PRD was reformatted from the original BR-xxx numbering scheme. The followin
 | BR-124, BR-125 | `cpt-cf-serverless-runtime-fr-replay-visualization` | FR-012 |
 | BR-201, BR-202, BR-203, BR-204, BR-205 | `cpt-cf-serverless-runtime-fr-advanced-deployment` | FR-013 |
 | BR-121 | `cpt-cf-serverless-runtime-fr-deployment-safety` | FR-014 |
+| BR-209, BR-210, BR-211, BR-212 | `cpt-cf-serverless-runtime-fr-llm-agent-integration` | FR-015 |
 | BR-006, BR-013, BR-016, BR-017, BR-023, BR-024, BR-025, BR-033, BR-034, BR-127 | `cpt-cf-serverless-runtime-nfr-security` | NFR Security |
 | BR-005, BR-012, BR-106, BR-113, BR-116 | `cpt-cf-serverless-runtime-nfr-resource-governance` | NFR Resource Governance |
 | BR-026 | `cpt-cf-serverless-runtime-nfr-reliability` | NFR Reliability |

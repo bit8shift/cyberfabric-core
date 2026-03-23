@@ -1,5 +1,32 @@
 # Technical Design — Serverless Runtime
 
+<!-- toc -->
+
+- [1. Architecture Overview](#1-architecture-overview)
+  - [1.1 Architectural Vision](#11-architectural-vision)
+  - [1.2 Architecture Drivers](#12-architecture-drivers)
+  - [1.3 Architecture Layers](#13-architecture-layers)
+- [2. Principles & Constraints](#2-principles--constraints)
+  - [2.1 Design Principles](#21-design-principles)
+  - [2.2 Constraints](#22-constraints)
+- [3. Technical Architecture](#3-technical-architecture)
+  - [3.1 Domain Model](#31-domain-model)
+  - [3.2 Component Model](#32-component-model)
+  - [3.3 API Contracts](#33-api-contracts)
+  - [3.4 Internal Dependencies](#34-internal-dependencies)
+  - [3.5 External Dependencies](#35-external-dependencies)
+  - [3.6 Interactions & Sequences](#36-interactions--sequences)
+  - [3.7 Database schemas & tables](#37-database-schemas--tables)
+- [4. Additional Context](#4-additional-context)
+  - [Security Considerations](#security-considerations)
+  - [Audit Events](#audit-events)
+  - [Comparison with Similar Solutions](#comparison-with-similar-solutions)
+  - [Implementation Considerations](#implementation-considerations)
+  - [Non-Applicable Domains](#non-applicable-domains)
+- [5. Traceability](#5-traceability)
+
+<!-- /toc -->
+
 <!--
 =============================================================================
 TECHNICAL DESIGN DOCUMENT
@@ -101,12 +128,13 @@ Requirements that significantly influence architecture decisions.
 | ADR ID | Decision Summary |
 |--------|-----------------|
 | `cpt-cf-serverless-runtime-adr-callable-type-hierarchy` | Unified callable type hierarchy: Function as base type, Workflow as derived specialization |
+| `cpt-cf-serverless-runtime-adr-jsonrpc-mcp-protocol-surfaces` | JSON-RPC 2.0 and MCP protocol surfaces for direct function invocation and AI agent tool integration |
 
 ### 1.3 Architecture Layers
 
 | Layer | Responsibility | Technology |
 |-------|---------------|------------|
-| API | REST endpoints for function management, invocation, scheduling, triggers, tenant policy, observability; JSON-RPC 2.0 endpoint for direct function invocation; MCP server endpoint for AI agent tool integration | REST / JSON, JSON-RPC 2.0, MCP (Streamable HTTP + SSE), RFC 9457 Problem Details |
+| API | REST endpoints for function management, invocation, scheduling, triggers, tenant policy, observability; JSON-RPC 2.0 endpoint for direct function invocation; MCP server endpoint for AI agent tool integration | REST / JSON, JSON-RPC 2.0, MCP (Streamable HTTP), RFC 9457 Problem Details |
 | Domain | Core entities, state machines, validation rules, GTS type resolution | Rust, GTS type system |
 | Runtime | Pluggable execution adapters, invocation engine, scheduler, event processing | Rust async traits, adapter plugins |
 | Infrastructure | Persistence, caching, event broker integration, secret management | TBD per deployment |
@@ -1816,9 +1844,119 @@ Implements the Model Context Protocol (MCP) 2025-03-26 Streamable HTTP transport
 - Does NOT manage the invocation lifecycle state machine -- the Invocation Engine handles status transitions
 - Does NOT present UI for elicitation -- sends the MCP `elicitation/create` request; the client is responsible for presenting the prompt
 
+#### Transport Gateway Architecture
+
+- [ ] `p1` - **ID**: `cpt-cf-serverless-runtime-component-transport-gateway`
+
+##### Why this component exists
+
+The protocol handlers above (REST, JSON-RPC, MCP) are **pluggable transports** — self-contained
+protocol surfaces that translate a wire format into Invocation Engine operations. The Transport
+Gateway is the deployment-time composition layer that decides which transports are active, what
+traffic each instance handles, and how they map to the shared domain core.
+
+This separation exists because different protocol surfaces have fundamentally different operational
+profiles. REST and JSON-RPC handle short-lived request/response cycles; MCP maintains long-lived
+SSE connections with session state. A single deployment configuration cannot optimally serve all
+traffic patterns, so the architecture must allow operators to compose and tune transport
+instances independently.
+
+##### Pluggable transport model
+
+Each transport is a self-contained module that:
+
+1. **Owns its wire format** — parses inbound messages, serializes responses, manages
+   protocol-specific sessions and connection lifecycle.
+2. **Speaks a common internal interface** — all transports route through the Invocation Engine
+   using the same domain operations (invoke, cancel, list, status). No transport has privileged
+   access to domain internals.
+3. **Declares its capabilities** — a transport advertises what it supports (streaming, sessions,
+   bidirectional communication) so the gateway can validate function trait compatibility at
+   routing time.
+4. **Is independently deployable** — a transport can be compiled in or out, enabled or disabled
+   via configuration, or deployed as a separate process behind a load balancer.
+
+The current transports are REST, JSON-RPC 2.0, and MCP. The model is designed to accommodate
+future transports — for example, a gRPC transport could be added to serve high-throughput
+service-to-service invocation without altering the domain layer or existing transports.
+
+##### Deployment topologies
+
+The gateway architecture supports a spectrum of deployment topologies, from a single binary to a
+fully decomposed fleet:
+
+**Single binary (monolith).** All transports are compiled into one binary and share a single
+process. This is the default for development and small deployments. Configuration enables or
+disables individual transports:
+
+```toml
+[transports]
+rest.enabled     = true
+json_rpc.enabled = true
+mcp.enabled      = true
+```
+
+**Single build, multiple configurations.** The same binary is deployed multiple times with
+different transport configurations. Each instance handles a subset of protocols, allowing
+independent scaling. For example, one pool handles REST and JSON-RPC traffic while a separate
+pool handles MCP's long-lived SSE connections:
+
+```toml
+# instance-pool: api
+[transports]
+rest.enabled     = true
+json_rpc.enabled = true
+mcp.enabled      = false
+
+# instance-pool: mcp
+[transports]
+rest.enabled     = false
+json_rpc.enabled = false
+mcp.enabled      = true
+```
+
+**GTS mask filtering.** Any transport instance can be further scoped to a GTS mask, restricting
+which functions it exposes. This allows a dedicated proxy tuned for a specific workload — for
+example, an MCP transport that only serves functions in a particular vendor namespace:
+
+```toml
+# instance-pool: mcp-analytics
+[transports]
+mcp.enabled  = true
+mcp.gts_mask = "gts.x.core.serverless.function.v1~vendor.analytics.*"
+```
+
+Multiple mask-scoped instances can coexist behind a routing layer (e.g., an ingress controller or
+service mesh) that directs traffic based on path prefix or header.
+
+**Fully decomposed.** Each transport runs as an independent service with its own binary, scaling
+policy, and resource limits. The services share no process state — they communicate with the
+domain layer through a defined internal API (or the Invocation Engine is deployed as its own
+service). This topology suits large-scale deployments where protocol-specific SLOs, connection
+limits, or compliance boundaries require physical isolation.
+
+##### Responsibility scope
+
+- Transport lifecycle management: initialize, configure, start, stop, health-check each
+  transport independently
+- Configuration-driven composition: read deployment config to determine which transports are
+  active, their GTS mask filters, and their scaling parameters
+- Common middleware: authentication, rate limiting, and request tracing are applied uniformly
+  across transports before protocol-specific handling begins
+- Transport registration: new transports plug in by implementing the transport trait and
+  registering with the gateway — no changes to the domain layer or existing transports required
+
+##### Responsibility boundaries
+
+- Does NOT define wire formats — each transport owns its own protocol implementation
+- Does NOT execute functions — transports delegate to the Invocation Engine
+- Does NOT replace the Invocation Engine's routing or authorization — the gateway controls
+  which transports are active and what GTS mask they serve; the Engine still enforces per-request
+  authorization
+
 ### 3.3 API Contracts
 
-**Technology**: REST / JSON, JSON-RPC 2.0, MCP (Streamable HTTP + SSE)
+**Technology**: REST / JSON, JSON-RPC 2.0, MCP (Streamable HTTP)
 **Base URL**: `/api/serverless-runtime/v1`
 
 All APIs require authentication. Authorization is enforced based on tenant context, user context, and required permissions per operation. The REST API uses standard request/response JSON. The JSON-RPC endpoint uses the JSON-RPC 2.0 wire format. The MCP endpoint uses MCP's Streamable HTTP transport with JSON-RPC 2.0 as the message format.
@@ -2919,6 +3057,7 @@ Multiple calls can be sent in a single HTTP request as a JSON array:
 Requests within a batch are independent — failure of one does not affect others. Batch requests
 are only supported for non-streaming functions. If any function in a batch has
 `stream_response: true`, the entire batch is rejected with `-32600 Invalid Request`.
+If a batch contains only notifications (all entries omit `id`), the server returns no response body.
 
 ##### 3) Notification (Fire-and-Forget)
 
@@ -3126,15 +3265,11 @@ Tool fields are mapped from the function definition:
 | `annotations.idempotentHint` | `traits.mcp.tool_annotations.idempotent_hint` |
 | `annotations.openWorldHint` | `traits.mcp.tool_annotations.open_world_hint` |
 
-**Spec deviation — tool name format.** The MCP specification constrains tool names to 1–64
-characters using only `a-zA-Z0-9_-./`. GTS identifiers violate this constraint: they contain
-tildes (`~`) and may exceed 64 characters. This is an intentional deviation — GTS IDs are the
-canonical function identifiers across all platform protocol surfaces (REST, JSON-RPC, MCP), and
-using a different naming scheme for MCP would break the uniform addressing model and complicate
-routing, authorization, and debugging. For external MCP clients, each tool exposes a
-spec-compliant `alias` derived from the vendor-specific segment of the GTS ID (the portion after
-the base type). The alias is included in list responses and accepted as an alternative to the
-GTS ID in call requests. The GTS ID remains the canonical identifier.
+**Tool naming and aliases.** GTS IDs are the canonical function identifiers across REST,
+JSON-RPC, and MCP. For MCP interoperability, each tool may also expose an alias derived from the
+vendor-specific segment of the GTS ID. The alias is included in list responses and accepted as an
+alternative identifier in call requests, while authorization, audit, and routing continue to use
+the canonical GTS ID.
 
 The server sends `notifications/tools/list_changed` when functions with MCP exposure are
 registered, updated, or removed.

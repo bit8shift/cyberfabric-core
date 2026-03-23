@@ -22,6 +22,23 @@ date: 2026-03-09
  -->
 # ADR — Function as Base Callable Type (Function → Workflow Hierarchy)
 
+<!-- toc -->
+
+- [Context and Problem Statement](#context-and-problem-statement)
+- [Decision Drivers](#decision-drivers)
+- [Considered Options](#considered-options)
+- [Decision Outcome](#decision-outcome)
+  - [Consequences](#consequences)
+  - [Confirmation](#confirmation)
+- [Pros and Cons of the Options](#pros-and-cons-of-the-options)
+  - [Option A: Function → Workflow (function as base type)](#option-a-function--workflow-function-as-base-type)
+  - [Option B: Entrypoint → Function | Workflow (abstract entrypoint base)](#option-b-entrypoint--function--workflow-abstract-entrypoint-base)
+  - [Option C: Callable → Function | Workflow (abstract callable base)](#option-c-callable--function--workflow-abstract-callable-base)
+- [More Information](#more-information)
+- [Traceability](#traceability)
+
+<!-- /toc -->
+
 **ID**: `cpt-cf-serverless-runtime-adr-callable-type-hierarchy`
 
 ## Context and Problem Statement
@@ -140,6 +157,6 @@ The execution mode (sync vs async) and invocation role (direct target vs helper 
 
 This decision directly addresses the following requirements and design elements:
 
-* `cpt-cf-serverless-runtime-design-domain-model` — Defines the GTS type hierarchy for Function and Workflow entities
-* `cpt-cf-serverless-runtime-fr-003` — Function definition and registration uses Function as the base callable type
-* `cpt-cf-serverless-runtime-fr-004` — Workflow definition extends Function with workflow_traits
+* `cpt-cf-serverless-runtime-principle-unified-function` — Defines the unified callable model where Function and Workflow share base semantics
+* `cpt-cf-serverless-runtime-fr-runtime-authoring` — Function and workflow definition and registration
+* `cpt-cf-serverless-runtime-fr-execution-engine` — Execution engine supports both function and workflow callable types
