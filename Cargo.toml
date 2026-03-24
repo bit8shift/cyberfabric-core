@@ -31,6 +31,7 @@ members = [
     "libs/modkit-db",
     "libs/modkit-db-macros",
     "libs/modkit-auth",
+    "libs/modkit-canonical-errors",
     "libs/modkit-http",
     "libs/modkit-sdk",
     "libs/modkit-odata-macros",
@@ -214,6 +215,7 @@ verbose_file_reads = "deny"
 modkit = { package = "cf-modkit", version = "0.5.11", path = "libs/modkit" }
 modkit-http = { package = "cf-modkit-http", version = "0.5.11", path = "libs/modkit-http" }
 modkit-auth = { package = "cf-modkit-auth", version = "0.5.11", path = "libs/modkit-auth" }
+modkit-canonical-errors = { package = "cf-modkit-canonical-errors", version = "0.5.11", path = "libs/modkit-canonical-errors" }
 modkit-db = { package = "cf-modkit-db", version = "0.5.11", path = "libs/modkit-db" }
 modkit-db-macros = { package = "cf-modkit-db-macros", version = "0.5.11", path = "libs/modkit-db-macros" }
 modkit-errors = { package = "cf-modkit-errors", version = "0.5.11", path = "libs/modkit-errors" }

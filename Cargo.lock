@@ -1392,6 +1392,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "cf-modkit-canonical-errors"
+version = "0.5.11"
+dependencies = [
+ "gts-id",
+ "sea-orm",
+ "serde",
+ "serde_json",
+ "trybuild",
+]
+
+[[package]]
 name = "cf-modkit-db"
 version = "0.5.11"
 dependencies = [
