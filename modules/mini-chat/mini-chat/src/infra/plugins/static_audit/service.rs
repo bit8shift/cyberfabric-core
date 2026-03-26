@@ -6,6 +6,7 @@ use mini_chat_sdk::{
     MiniChatAuditPluginClientV1, MiniChatAuditPluginError, TurnAuditEvent, TurnDeleteAuditEvent,
     TurnEditAuditEvent, TurnRetryAuditEvent,
 };
+use tokio_util::sync::CancellationToken;
 
 /// Service for the static audit plugin.
 ///
@@ -18,7 +19,11 @@ pub struct Service {
 
 #[async_trait]
 impl MiniChatAuditPluginClientV1 for Service {
-    async fn emit_turn_audit(&self, event: TurnAuditEvent) -> Result<(), MiniChatAuditPluginError> {
+    async fn emit_turn_audit(
+        &self,
+        event: TurnAuditEvent,
+        _cancel: CancellationToken,
+    ) -> Result<(), MiniChatAuditPluginError> {
         if !self.enabled {
             return Ok(());
         }
@@ -33,6 +38,9 @@ impl MiniChatAuditPluginClientV1 for Service {
             effective_model = %event.effective_model,
             input_tokens = event.usage.input_tokens,
             output_tokens = event.usage.output_tokens,
+            cache_read_input_tokens = event.usage.cache_read_input_tokens,
+            cache_write_input_tokens = event.usage.cache_write_input_tokens,
+            reasoning_tokens = event.usage.reasoning_tokens,
             error_code = event.error_code.as_deref(),
             "audit: turn event"
         );
@@ -42,6 +50,7 @@ impl MiniChatAuditPluginClientV1 for Service {
     async fn emit_turn_retry_audit(
         &self,
         event: TurnRetryAuditEvent,
+        _cancel: CancellationToken,
     ) -> Result<(), MiniChatAuditPluginError> {
         if !self.enabled {
             return Ok(());
@@ -61,6 +70,7 @@ impl MiniChatAuditPluginClientV1 for Service {
     async fn emit_turn_edit_audit(
         &self,
         event: TurnEditAuditEvent,
+        _cancel: CancellationToken,
     ) -> Result<(), MiniChatAuditPluginError> {
         if !self.enabled {
             return Ok(());
@@ -80,6 +90,7 @@ impl MiniChatAuditPluginClientV1 for Service {
     async fn emit_turn_delete_audit(
         &self,
         event: TurnDeleteAuditEvent,
+        _cancel: CancellationToken,
     ) -> Result<(), MiniChatAuditPluginError> {
         if !self.enabled {
             return Ok(());

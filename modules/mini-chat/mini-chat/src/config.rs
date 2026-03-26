@@ -6,6 +6,9 @@ use serde::{Deserialize, Serialize};
 use crate::infra::llm::ProviderKind;
 use crate::module::DEFAULT_URL_PREFIX;
 
+pub mod background;
+pub use background::{CleanupWorkerConfig, OrphanWatchdogConfig, ThreadSummaryWorkerConfig};
+
 #[derive(Debug, Clone, Serialize, Deserialize, modkit_macros::ExpandVars)]
 #[serde(deny_unknown_fields)]
 pub struct MiniChatConfig {
@@ -37,6 +40,15 @@ pub struct MiniChatConfig {
     #[expand_vars]
     #[serde(default = "default_providers")]
     pub providers: HashMap<String, ProviderEntry>,
+    /// Orphan watchdog background worker.
+    #[serde(default)]
+    pub orphan_watchdog: OrphanWatchdogConfig,
+    /// Thread summary background worker.
+    #[serde(default)]
+    pub thread_summary_worker: ThreadSummaryWorkerConfig,
+    /// Cleanup background worker for soft-deleted chat resources.
+    #[serde(default)]
+    pub cleanup_worker: CleanupWorkerConfig,
 }
 
 /// Which file/vector-store implementation to use for RAG operations.
@@ -385,6 +397,9 @@ impl Default for MiniChatConfig {
             client_credentials: ClientCredentialsConfig::default(),
             metrics: MetricsConfig::default(),
             providers: default_providers(),
+            orphan_watchdog: OrphanWatchdogConfig::default(),
+            thread_summary_worker: ThreadSummaryWorkerConfig::default(),
+            cleanup_worker: CleanupWorkerConfig::default(),
         }
     }
 }
@@ -490,6 +505,12 @@ fn default_web_search_max_calls() -> u32 {
 fn default_web_search_daily_quota() -> u32 {
     75
 }
+fn default_ci_max_calls() -> u32 {
+    10
+}
+fn default_ci_daily_quota() -> u32 {
+    50
+}
 fn default_warning_threshold_pct() -> u8 {
     80
 }
@@ -504,6 +525,10 @@ pub struct QuotaConfig {
     pub web_search_max_calls_per_message: u32,
     #[serde(default = "default_web_search_daily_quota")]
     pub web_search_daily_quota: u32,
+    #[serde(default = "default_ci_max_calls")]
+    pub code_interpreter_max_calls_per_message: u32,
+    #[serde(default = "default_ci_daily_quota")]
+    pub code_interpreter_daily_quota: u32,
     #[serde(default = "default_warning_threshold_pct")]
     pub warning_threshold_pct: u8,
 }
@@ -514,6 +539,8 @@ impl Default for QuotaConfig {
             overshoot_tolerance_factor: default_overshoot_tolerance(),
             web_search_max_calls_per_message: default_web_search_max_calls(),
             web_search_daily_quota: default_web_search_daily_quota(),
+            code_interpreter_max_calls_per_message: default_ci_max_calls(),
+            code_interpreter_daily_quota: default_ci_daily_quota(),
             warning_threshold_pct: default_warning_threshold_pct(),
         }
     }
@@ -532,6 +559,12 @@ impl QuotaConfig {
         }
         if self.web_search_daily_quota == 0 {
             return Err("web_search_daily_quota must be > 0".to_owned());
+        }
+        if self.code_interpreter_max_calls_per_message == 0 {
+            return Err("code_interpreter_max_calls_per_message must be > 0".to_owned());
+        }
+        if self.code_interpreter_daily_quota == 0 {
+            return Err("code_interpreter_daily_quota must be > 0".to_owned());
         }
         if self.warning_threshold_pct == 0 || self.warning_threshold_pct >= 100 {
             return Err(format!(
@@ -554,6 +587,9 @@ pub struct OutboxConfig {
     /// Queue name for attachment cleanup events.
     #[serde(default = "default_outbox_cleanup_queue_name")]
     pub cleanup_queue_name: String,
+    /// Queue name for thread summary task events.
+    #[serde(default = "default_thread_summary_queue_name")]
+    pub thread_summary_queue_name: String,
     /// Queue name for audit events.
     #[serde(default = "default_audit_queue_name")]
     pub audit_queue_name: String,
@@ -568,6 +604,7 @@ impl Default for OutboxConfig {
         Self {
             queue_name: default_outbox_queue_name(),
             cleanup_queue_name: default_outbox_cleanup_queue_name(),
+            thread_summary_queue_name: default_thread_summary_queue_name(),
             audit_queue_name: default_audit_queue_name(),
             num_partitions: default_outbox_num_partitions(),
         }
@@ -581,6 +618,9 @@ impl OutboxConfig {
         }
         if self.cleanup_queue_name.trim().is_empty() {
             return Err("outbox cleanup_queue_name must not be empty".to_owned());
+        }
+        if self.thread_summary_queue_name.trim().is_empty() {
+            return Err("outbox thread_summary_queue_name must not be empty".to_owned());
         }
         if self.audit_queue_name.trim().is_empty() {
             return Err("outbox audit_queue_name must not be empty".to_owned());
@@ -601,6 +641,10 @@ fn default_outbox_queue_name() -> String {
 
 fn default_outbox_cleanup_queue_name() -> String {
     "mini-chat.attachment_cleanup".to_owned()
+}
+
+fn default_thread_summary_queue_name() -> String {
+    "mini-chat.thread_summary".to_owned()
 }
 
 fn default_audit_queue_name() -> String {
@@ -842,6 +886,22 @@ mod tests {
         assert!(
             (QuotaConfig {
                 web_search_daily_quota: 0,
+                ..QuotaConfig::default()
+            })
+            .validate()
+            .is_err()
+        );
+        assert!(
+            (QuotaConfig {
+                code_interpreter_max_calls_per_message: 0,
+                ..QuotaConfig::default()
+            })
+            .validate()
+            .is_err()
+        );
+        assert!(
+            (QuotaConfig {
+                code_interpreter_daily_quota: 0,
                 ..QuotaConfig::default()
             })
             .validate()

@@ -24,6 +24,8 @@ pub struct InfraOutboxEnqueuer {
     outbox: Arc<Outbox>,
     usage_queue_name: String,
     cleanup_queue_name: String,
+    #[allow(dead_code)]
+    thread_summary_queue_name: String,
     audit_queue_name: String,
     num_partitions: u32,
 }
@@ -33,6 +35,7 @@ impl InfraOutboxEnqueuer {
         outbox: Arc<Outbox>,
         usage_queue_name: String,
         cleanup_queue_name: String,
+        thread_summary_queue_name: String,
         audit_queue_name: String,
         num_partitions: u32,
     ) -> Self {
@@ -40,6 +43,7 @@ impl InfraOutboxEnqueuer {
             outbox,
             usage_queue_name,
             cleanup_queue_name,
+            thread_summary_queue_name,
             audit_queue_name,
             num_partitions,
         }
@@ -55,6 +59,40 @@ impl InfraOutboxEnqueuer {
         {
             (hash % u128::from(num_partitions)) as u32
         }
+    }
+
+    /// Enqueue a thread summary task event within the caller's transaction.
+    ///
+    /// Partitions by `chat_id` so all summary events for a given chat land in
+    /// the same partition (processed in order by a single consumer).
+    #[allow(dead_code)]
+    pub async fn enqueue_thread_summary_task(
+        &self,
+        runner: &(dyn modkit_db::secure::DBRunner + Sync),
+        chat_id: uuid::Uuid,
+        payload: Vec<u8>,
+    ) -> Result<(), DomainError> {
+        let partition = Self::compute_partition(chat_id, self.num_partitions);
+
+        self.outbox
+            .enqueue(
+                runner,
+                &self.thread_summary_queue_name,
+                partition,
+                payload,
+                "application/json",
+            )
+            .await
+            .map_err(|e| DomainError::internal(format!("outbox enqueue: {e}")))?;
+
+        info!(
+            queue = %self.thread_summary_queue_name,
+            partition,
+            chat_id = %chat_id,
+            "thread summary task enqueued"
+        );
+
+        Ok(())
     }
 }
 
@@ -159,31 +197,6 @@ impl OutboxEnqueuer for InfraOutboxEnqueuer {
 
     fn flush(&self) {
         self.outbox.flush();
-    }
-}
-
-/// Stub handler for attachment cleanup events.
-///
-/// Returns `Retry` for every message — events accumulate safely in the outbox
-/// until the cleanup worker ships. This ensures the queue is registered and
-/// partitioned from day one.
-pub struct AttachmentCleanupHandler;
-
-#[async_trait]
-impl modkit_db::outbox::MessageHandler for AttachmentCleanupHandler {
-    async fn handle(
-        &self,
-        msg: &modkit_db::outbox::OutboxMessage,
-        _cancel: tokio_util::sync::CancellationToken,
-    ) -> modkit_db::outbox::HandlerResult {
-        warn!(
-            partition_id = msg.partition_id,
-            seq = msg.seq,
-            "attachment cleanup handler not yet implemented - retrying"
-        );
-        modkit_db::outbox::HandlerResult::Retry {
-            reason: "cleanup handler not yet implemented".to_owned(),
-        }
     }
 }
 
@@ -319,27 +332,12 @@ pub struct AuditEventHandler {
 }
 
 #[async_trait]
-impl modkit_db::outbox::MessageHandler for AuditEventHandler {
+impl modkit_db::outbox::Handler for AuditEventHandler {
     async fn handle(
         &self,
-        msg: &modkit_db::outbox::OutboxMessage,
-        _cancel: tokio_util::sync::CancellationToken,
+        msg: &[modkit_db::outbox::OutboxMessage],
+        cancel: tokio_util::sync::CancellationToken,
     ) -> modkit_db::outbox::HandlerResult {
-        let envelope = match serde_json::from_slice::<AuditEnvelope>(&msg.payload) {
-            Ok(e) => e,
-            Err(e) => {
-                tracing::error!(
-                    partition_id = msg.partition_id,
-                    seq = msg.seq,
-                    payload_len = msg.payload.len(),
-                    "audit event deserialization failed: {e}"
-                );
-                return modkit_db::outbox::HandlerResult::Reject {
-                    reason: format!("deserialization failed: {e}"),
-                };
-            }
-        };
-
         let plugin = match self.audit_gateway.get_plugin().await {
             Ok(Some(p)) => p,
             Ok(None) => {
@@ -347,77 +345,91 @@ impl modkit_db::outbox::MessageHandler for AuditEventHandler {
                 return modkit_db::outbox::HandlerResult::Success;
             }
             Err(e) => {
-                warn!(
-                    partition_id = msg.partition_id,
-                    seq = msg.seq,
-                    error = %e,
-                    "audit plugin resolution failed - will retry"
-                );
+                warn!(error = %e, "audit plugin resolution failed - will retry");
                 return modkit_db::outbox::HandlerResult::Retry {
                     reason: format!("plugin resolution failed: {e}"),
                 };
             }
         };
 
-        let result: Result<(), MiniChatAuditPluginError> = match &envelope {
-            AuditEnvelope::Turn(evt) => {
-                tokio::time::timeout(AUDIT_PLUGIN_TIMEOUT, plugin.emit_turn_audit(evt.clone()))
-                    .await
-                    .unwrap_or(Err(MiniChatAuditPluginError::PluginTimeout))
-            }
-            AuditEnvelope::Mutation(evt) => match evt.event_type {
-                TurnMutationAuditEventType::TurnRetry => tokio::time::timeout(
-                    AUDIT_PLUGIN_TIMEOUT,
-                    plugin.emit_turn_retry_audit(evt.clone()),
-                )
-                .await
-                .unwrap_or(Err(MiniChatAuditPluginError::PluginTimeout)),
-                TurnMutationAuditEventType::TurnEdit => tokio::time::timeout(
-                    AUDIT_PLUGIN_TIMEOUT,
-                    plugin.emit_turn_edit_audit(evt.clone()),
-                )
-                .await
-                .unwrap_or(Err(MiniChatAuditPluginError::PluginTimeout)),
-            },
-            AuditEnvelope::Delete(evt) => tokio::time::timeout(
-                AUDIT_PLUGIN_TIMEOUT,
-                plugin.emit_turn_delete_audit(evt.clone()),
-            )
-            .await
-            .unwrap_or(Err(MiniChatAuditPluginError::PluginTimeout)),
-        };
-
-        match result {
-            Ok(()) => {
-                self.metrics.record_audit_emit(metric_labels::result::OK);
-                modkit_db::outbox::HandlerResult::Success
-            }
-            Err(e) if e.is_transient() => {
-                warn!(
-                    partition_id = msg.partition_id,
-                    seq = msg.seq,
-                    error = %e,
-                    "audit emit transient failure - will retry"
-                );
-                self.metrics.record_audit_emit(metric_labels::result::RETRY);
-                modkit_db::outbox::HandlerResult::Retry {
-                    reason: e.to_string(),
+        for m in msg {
+            let envelope = match serde_json::from_slice::<AuditEnvelope>(&m.payload) {
+                Ok(e) => e,
+                Err(e) => {
+                    tracing::error!(
+                        partition_id = m.partition_id,
+                        seq = m.seq,
+                        payload_len = m.payload.len(),
+                        "audit event deserialization failed: {e}"
+                    );
+                    return modkit_db::outbox::HandlerResult::Reject {
+                        reason: format!("deserialization failed: {e}"),
+                    };
                 }
-            }
-            Err(e) => {
-                tracing::error!(
-                    partition_id = msg.partition_id,
-                    seq = msg.seq,
-                    error = %e,
-                    "audit emit permanent failure - dead-lettering"
-                );
-                self.metrics
-                    .record_audit_emit(metric_labels::result::REJECT);
-                modkit_db::outbox::HandlerResult::Reject {
-                    reason: e.to_string(),
+            };
+
+            let result: Result<(), MiniChatAuditPluginError> = match &envelope {
+                AuditEnvelope::Turn(evt) => tokio::time::timeout(
+                    AUDIT_PLUGIN_TIMEOUT,
+                    plugin.emit_turn_audit(evt.clone(), cancel.clone()),
+                )
+                .await
+                .unwrap_or(Err(MiniChatAuditPluginError::PluginTimeout)),
+                AuditEnvelope::Mutation(evt) => match evt.event_type {
+                    TurnMutationAuditEventType::TurnRetry => tokio::time::timeout(
+                        AUDIT_PLUGIN_TIMEOUT,
+                        plugin.emit_turn_retry_audit(evt.clone(), cancel.clone()),
+                    )
+                    .await
+                    .unwrap_or(Err(MiniChatAuditPluginError::PluginTimeout)),
+                    TurnMutationAuditEventType::TurnEdit => tokio::time::timeout(
+                        AUDIT_PLUGIN_TIMEOUT,
+                        plugin.emit_turn_edit_audit(evt.clone(), cancel.clone()),
+                    )
+                    .await
+                    .unwrap_or(Err(MiniChatAuditPluginError::PluginTimeout)),
+                },
+                AuditEnvelope::Delete(evt) => tokio::time::timeout(
+                    AUDIT_PLUGIN_TIMEOUT,
+                    plugin.emit_turn_delete_audit(evt.clone(), cancel.clone()),
+                )
+                .await
+                .unwrap_or(Err(MiniChatAuditPluginError::PluginTimeout)),
+            };
+
+            match result {
+                Ok(()) => {
+                    self.metrics.record_audit_emit(metric_labels::result::OK);
+                }
+                Err(e) if e.is_transient() => {
+                    warn!(
+                        partition_id = m.partition_id,
+                        seq = m.seq,
+                        error = %e,
+                        "audit emit transient failure - will retry"
+                    );
+                    self.metrics.record_audit_emit(metric_labels::result::RETRY);
+                    return modkit_db::outbox::HandlerResult::Retry {
+                        reason: e.to_string(),
+                    };
+                }
+                Err(e) => {
+                    tracing::error!(
+                        partition_id = m.partition_id,
+                        seq = m.seq,
+                        error = %e,
+                        "audit emit permanent failure - dead-lettering"
+                    );
+                    self.metrics
+                        .record_audit_emit(metric_labels::result::REJECT);
+                    return modkit_db::outbox::HandlerResult::Reject {
+                        reason: e.to_string(),
+                    };
                 }
             }
         }
+
+        modkit_db::outbox::HandlerResult::Success
     }
 }
 
@@ -429,7 +441,9 @@ mod tests {
         MiniChatModelPolicyPluginError, PolicySnapshot, PolicyVersionInfo, PublishError,
         TurnAuditEvent, TurnDeleteAuditEvent, TurnEditAuditEvent, TurnRetryAuditEvent, UserLimits,
     };
-    use modkit_db::outbox::{HandlerResult, MessageHandler, OutboxMessage};
+    use modkit_db::outbox::{
+        DecoupledConfig, Handler, HandlerResult, MessageHandler, OutboxMessage,
+    };
     use std::sync::atomic::{AtomicU32, Ordering};
     use time::OffsetDateTime;
     use tokio_util::sync::CancellationToken;
@@ -450,6 +464,8 @@ mod tests {
             actual_credits_micro: 500,
             settlement_method: "quota".to_owned(),
             policy_version_applied: 1,
+            web_search_calls: 0,
+            code_interpreter_calls: 0,
             timestamp: OffsetDateTime::now_utc(),
         }
     }
@@ -691,9 +707,18 @@ mod tests {
     // ── AuditEventHandler unit tests ──
 
     /// Mock audit plugin that records `emit_*` calls and always returns `Ok(())`.
+    enum AuditBehavior {
+        Ok,
+        Transient(String),
+        Permanent(String),
+        /// Returns Transient("cancelled") when the supplied token is already cancelled.
+        RespectCancel,
+    }
+
     struct MockAuditPlugin {
         call_count: AtomicU32,
         notifier: tokio::sync::Notify,
+        behavior: AuditBehavior,
     }
 
     impl MockAuditPlugin {
@@ -701,6 +726,31 @@ mod tests {
             Arc::new(Self {
                 call_count: AtomicU32::new(0),
                 notifier: tokio::sync::Notify::new(),
+                behavior: AuditBehavior::Ok,
+            })
+        }
+
+        fn transient(msg: &str) -> Arc<Self> {
+            Arc::new(Self {
+                call_count: AtomicU32::new(0),
+                notifier: tokio::sync::Notify::new(),
+                behavior: AuditBehavior::Transient(msg.to_owned()),
+            })
+        }
+
+        fn permanent(msg: &str) -> Arc<Self> {
+            Arc::new(Self {
+                call_count: AtomicU32::new(0),
+                notifier: tokio::sync::Notify::new(),
+                behavior: AuditBehavior::Permanent(msg.to_owned()),
+            })
+        }
+
+        fn cancel_aware() -> Arc<Self> {
+            Arc::new(Self {
+                call_count: AtomicU32::new(0),
+                notifier: tokio::sync::Notify::new(),
+                behavior: AuditBehavior::RespectCancel,
             })
         }
 
@@ -712,34 +762,60 @@ mod tests {
             self.call_count.fetch_add(1, Ordering::SeqCst);
             self.notifier.notify_one();
         }
+
+        fn emit_result(&self, cancel: &CancellationToken) -> Result<(), MiniChatAuditPluginError> {
+            match &self.behavior {
+                AuditBehavior::Ok => Ok(()),
+                AuditBehavior::Transient(msg) => {
+                    Err(MiniChatAuditPluginError::Transient(msg.clone()))
+                }
+                AuditBehavior::Permanent(msg) => {
+                    Err(MiniChatAuditPluginError::Permanent(msg.clone()))
+                }
+                AuditBehavior::RespectCancel => {
+                    if cancel.is_cancelled() {
+                        Err(MiniChatAuditPluginError::Transient("cancelled".to_owned()))
+                    } else {
+                        Ok(())
+                    }
+                }
+            }
+        }
     }
 
     #[async_trait]
     impl MiniChatAuditPluginClientV1 for MockAuditPlugin {
-        async fn emit_turn_audit(&self, _: TurnAuditEvent) -> Result<(), MiniChatAuditPluginError> {
+        async fn emit_turn_audit(
+            &self,
+            _: TurnAuditEvent,
+            cancel: CancellationToken,
+        ) -> Result<(), MiniChatAuditPluginError> {
             self.record();
-            Ok(())
+            self.emit_result(&cancel)
         }
         async fn emit_turn_retry_audit(
             &self,
             _: TurnRetryAuditEvent,
+            cancel: CancellationToken,
         ) -> Result<(), MiniChatAuditPluginError> {
             self.record();
-            Ok(())
+            self.emit_result(&cancel)
         }
         async fn emit_turn_edit_audit(
             &self,
             _: TurnEditAuditEvent,
+            cancel: CancellationToken,
         ) -> Result<(), MiniChatAuditPluginError> {
             self.record();
-            Ok(())
+            self.emit_result(&cancel)
         }
         async fn emit_turn_delete_audit(
             &self,
             _: TurnDeleteAuditEvent,
+            cancel: CancellationToken,
         ) -> Result<(), MiniChatAuditPluginError> {
             self.record();
-            Ok(())
+            self.emit_result(&cancel)
         }
     }
 
@@ -762,6 +838,9 @@ mod tests {
                 input_tokens: 10,
                 output_tokens: 20,
                 model: None,
+                cache_read_input_tokens: None,
+                cache_write_input_tokens: None,
+                reasoning_tokens: None,
             },
             latency_ms: mini_chat_sdk::LatencyMs::default(),
             policy_decisions: mini_chat_sdk::PolicyDecisions {
@@ -783,15 +862,19 @@ mod tests {
     }
 
     // ── AuditEventHandler: invalid payload → Reject ──
+    //
+    // Note: the handler only deserializes payloads when a plugin is present.
+    // Use an `ok` plugin so the handler reaches the deserialization step.
 
     #[tokio::test]
     async fn audit_handler_reject_for_invalid_payload() {
+        let plugin = MockAuditPlugin::ok();
         let handler = AuditEventHandler {
-            audit_gateway: AuditGateway::noop(),
+            audit_gateway: AuditGateway::from_plugin(plugin),
             metrics: Arc::new(crate::domain::ports::metrics::NoopMetrics),
         };
         let msg = make_outbox_message(b"not json".to_vec());
-        let result = handler.handle(&msg, CancellationToken::new()).await;
+        let result = handler.handle(&[msg], CancellationToken::new()).await;
         assert!(
             matches!(result, HandlerResult::Reject { .. }),
             "expected Reject for corrupt payload"
@@ -808,11 +891,117 @@ mod tests {
         };
         let payload = make_audit_envelope_payload();
         let msg = make_outbox_message(payload);
-        let result = handler.handle(&msg, CancellationToken::new()).await;
+        let result = handler.handle(&[msg], CancellationToken::new()).await;
         assert!(
             matches!(result, HandlerResult::Success),
             "expected Success when no plugin configured"
         );
+    }
+
+    // ── AuditEventHandler: transient plugin error → Retry ──
+
+    #[tokio::test]
+    async fn audit_handler_retry_on_transient_plugin_error() {
+        let plugin = MockAuditPlugin::transient("network blip");
+        let audit_gateway = AuditGateway::from_plugin(plugin.clone());
+        let handler = AuditEventHandler {
+            audit_gateway,
+            metrics: Arc::new(crate::domain::ports::metrics::NoopMetrics),
+        };
+        let msg = make_outbox_message(make_audit_envelope_payload());
+        let result = handler.handle(&[msg], CancellationToken::new()).await;
+        assert!(
+            matches!(result, HandlerResult::Retry { .. }),
+            "expected Retry for transient plugin error"
+        );
+        assert_eq!(plugin.calls(), 1);
+    }
+
+    // ── AuditEventHandler: permanent plugin error → Reject ──
+
+    #[tokio::test]
+    async fn audit_handler_reject_on_permanent_plugin_error() {
+        let plugin = MockAuditPlugin::permanent("schema mismatch");
+        let audit_gateway = AuditGateway::from_plugin(plugin.clone());
+        let handler = AuditEventHandler {
+            audit_gateway,
+            metrics: Arc::new(crate::domain::ports::metrics::NoopMetrics),
+        };
+        let msg = make_outbox_message(make_audit_envelope_payload());
+        let result = handler.handle(&[msg], CancellationToken::new()).await;
+        assert!(
+            matches!(result, HandlerResult::Reject { .. }),
+            "expected Reject for permanent plugin error"
+        );
+        assert_eq!(plugin.calls(), 1);
+    }
+
+    // ── AuditEventHandler: cancelled token propagates to plugin → Retry ──
+
+    #[tokio::test]
+    async fn audit_handler_retry_when_cancelled() {
+        let plugin = MockAuditPlugin::cancel_aware();
+        let audit_gateway = AuditGateway::from_plugin(plugin.clone());
+        let handler = AuditEventHandler {
+            audit_gateway,
+            metrics: Arc::new(crate::domain::ports::metrics::NoopMetrics),
+        };
+        let msg = make_outbox_message(make_audit_envelope_payload());
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let result = handler.handle(&[msg], cancel).await;
+        assert!(
+            matches!(result, HandlerResult::Retry { .. }),
+            "expected Retry when token is cancelled"
+        );
+    }
+
+    // ── AuditEventHandler: batch of messages — all succeed → Success ──
+
+    #[tokio::test]
+    async fn audit_handler_processes_all_messages_in_batch() {
+        let plugin = MockAuditPlugin::ok();
+        let audit_gateway = AuditGateway::from_plugin(plugin.clone());
+        let handler = AuditEventHandler {
+            audit_gateway,
+            metrics: Arc::new(crate::domain::ports::metrics::NoopMetrics),
+        };
+        let payload = make_audit_envelope_payload();
+        let messages = vec![
+            make_outbox_message(payload.clone()),
+            make_outbox_message(payload.clone()),
+            make_outbox_message(payload),
+        ];
+        let result = handler.handle(&messages, CancellationToken::new()).await;
+        assert!(
+            matches!(result, HandlerResult::Success),
+            "expected Success when all messages in batch succeed"
+        );
+        assert_eq!(plugin.calls(), 3, "all 3 messages should have been emitted");
+    }
+
+    // ── AuditEventHandler: batch stops at first failure ──
+
+    #[tokio::test]
+    async fn audit_handler_stops_batch_on_first_failure() {
+        let plugin = MockAuditPlugin::transient("flaky");
+        let audit_gateway = AuditGateway::from_plugin(plugin.clone());
+        let handler = AuditEventHandler {
+            audit_gateway,
+            metrics: Arc::new(crate::domain::ports::metrics::NoopMetrics),
+        };
+        let payload = make_audit_envelope_payload();
+        let messages = vec![
+            make_outbox_message(payload.clone()),
+            make_outbox_message(payload.clone()),
+            make_outbox_message(payload),
+        ];
+        let result = handler.handle(&messages, CancellationToken::new()).await;
+        assert!(
+            matches!(result, HandlerResult::Retry { .. }),
+            "expected Retry on first message failure"
+        );
+        assert_eq!(plugin.calls(), 1, "should have stopped after first failure");
     }
 
     // ── 7.11: Integration test — AuditEventHandler full pipeline ──
@@ -863,10 +1052,13 @@ mod tests {
 
         let handle = Outbox::builder(db.clone())
             .queue("test.audit", Partitions::of(1))
-            .decoupled(AuditEventHandler {
-                audit_gateway: Arc::clone(&audit_gateway),
-                metrics: Arc::new(crate::domain::ports::metrics::NoopMetrics),
-            })
+            .batch_decoupled_with(
+                AuditEventHandler {
+                    audit_gateway: Arc::clone(&audit_gateway),
+                    metrics: Arc::new(crate::domain::ports::metrics::NoopMetrics),
+                },
+                DecoupledConfig::default(),
+            )
             .start()
             .await
             .expect("outbox start");
@@ -876,6 +1068,7 @@ mod tests {
             outbox,
             "test.usage".to_owned(),
             "test.cleanup".to_owned(),
+            "test.thread_summary".to_owned(),
             "test.audit".to_owned(),
             1u32,
         );
@@ -947,6 +1140,7 @@ mod tests {
             outbox,
             "test.usage".to_owned(),
             "test.cleanup".to_owned(),
+            "test.thread_summary".to_owned(),
             "test.audit".to_owned(),
             1u32,
         );

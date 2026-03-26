@@ -254,6 +254,7 @@ impl<TR: TurnRepository + 'static, MR: MessageRepository + 'static> Finalization
                         settlement_path,
                         period_starts: input.period_starts.clone(),
                         web_search_calls: input.web_search_calls,
+                        code_interpreter_calls: input.code_interpreter_calls,
                     };
                     let settlement_outcome = quota_settler
                         .settle_in_tx(tx, &scope, settlement_input)
@@ -280,6 +281,13 @@ impl<TR: TurnRepository + 'static, MR: MessageRepository + 'static> Finalization
                                     content: input.accumulated_text.clone(),
                                     input_tokens: input.usage.map(|u| u.input_tokens),
                                     output_tokens: input.usage.map(|u| u.output_tokens),
+                                    cache_read_input_tokens: input
+                                        .usage
+                                        .map(|u| u.cache_read_input_tokens),
+                                    cache_write_input_tokens: input
+                                        .usage
+                                        .map(|u| u.cache_write_input_tokens),
+                                    reasoning_tokens: input.usage.map(|u| u.reasoning_tokens),
                                     model: Some(input.effective_model.clone()),
                                     provider_response_id: input.provider_response_id.clone(),
                                 },
@@ -379,6 +387,13 @@ impl<TR: TurnRepository + 'static, MR: MessageRepository + 'static> Finalization
                         metrics.record_quota_overshoot(period::MONTHLY);
                     }
                 }
+
+                if input.code_interpreter_calls > 0 {
+                    metrics.record_code_interpreter_calls(
+                        &input.effective_model,
+                        input.code_interpreter_calls,
+                    );
+                }
             }
             SettlementMethod::Estimated | SettlementMethod::Released => {
                 // No overshoot metric here: overshoot measures actual > reserved,
@@ -427,6 +442,9 @@ fn build_turn_audit_envelope(input: &FinalizationInput, trace_id: Option<String>
     let usage = input.usage.unwrap_or(Usage {
         input_tokens: 0,
         output_tokens: 0,
+        cache_read_input_tokens: 0,
+        cache_write_input_tokens: 0,
+        reasoning_tokens: 0,
     });
 
     AuditEnvelope::Turn(TurnAuditEvent {
@@ -446,6 +464,9 @@ fn build_turn_audit_envelope(input: &FinalizationInput, trace_id: Option<String>
             input_tokens: usage.input_tokens.cast_unsigned(),
             output_tokens: usage.output_tokens.cast_unsigned(),
             model: Some(input.effective_model.clone()),
+            cache_read_input_tokens: Some(usage.cache_read_input_tokens.cast_unsigned()),
+            cache_write_input_tokens: Some(usage.cache_write_input_tokens.cast_unsigned()),
+            reasoning_tokens: Some(usage.reasoning_tokens.cast_unsigned()),
         },
         latency_ms: LatencyMs {
             ttft_ms: input.ttft_ms,
@@ -497,10 +518,15 @@ fn build_usage_event(
         usage: input.usage.map(|u| UsageTokens {
             input_tokens: u.input_tokens.cast_unsigned(),
             output_tokens: u.output_tokens.cast_unsigned(),
+            cache_read_input_tokens: u.cache_read_input_tokens.cast_unsigned(),
+            cache_write_input_tokens: u.cache_write_input_tokens.cast_unsigned(),
+            reasoning_tokens: u.reasoning_tokens.cast_unsigned(),
         }),
         actual_credits_micro: settlement.actual_credits_micro,
         settlement_method: settlement_method.to_owned(),
         policy_version_applied: input.policy_version_applied,
+        web_search_calls: input.web_search_calls,
+        code_interpreter_calls: input.code_interpreter_calls,
         timestamp: time::OffsetDateTime::now_utc(),
     }
 }
@@ -734,6 +760,9 @@ mod tests {
             usage: Some(Usage {
                 input_tokens: 10,
                 output_tokens: 5,
+                cache_read_input_tokens: 0,
+                cache_write_input_tokens: 0,
+                reasoning_tokens: 0,
             }),
             provider_response_id: Some("resp-123".to_owned()),
             effective_model: "gpt-5.2".to_owned(),
@@ -751,6 +780,7 @@ mod tests {
                 (PeriodType::Monthly, month_start),
             ],
             web_search_calls: 3,
+            code_interpreter_calls: 0,
             ttft_ms: None,
             total_ms: None,
         }
@@ -988,6 +1018,48 @@ mod tests {
             metrics.quota_actual_tokens.load(Ordering::Relaxed),
             1,
             "should record quota_actual_tokens"
+        );
+    }
+
+    #[tokio::test]
+    async fn cas_winner_emits_code_interpreter_calls_metric() {
+        use crate::domain::service::test_helpers::TestMetrics;
+        use std::sync::atomic::Ordering;
+
+        let db = mock_db_provider(inmem_db().await);
+        let metrics = Arc::new(TestMetrics::new());
+        let (svc, _outbox) =
+            build_finalization_service_with_metrics(Arc::clone(&db), Arc::clone(&metrics) as _);
+
+        let tenant_id = Uuid::new_v4();
+        let chat_id = Uuid::new_v4();
+        let turn_id = Uuid::new_v4();
+        let request_id = Uuid::new_v4();
+        let user_id = Uuid::new_v4();
+
+        insert_test_chat(&db, tenant_id, chat_id, user_id).await;
+        insert_running_turn(&db, tenant_id, chat_id, turn_id, request_id).await;
+
+        let mut input = make_input(
+            tenant_id,
+            chat_id,
+            turn_id,
+            request_id,
+            user_id,
+            TurnState::Completed,
+        );
+        input.code_interpreter_calls = 5;
+
+        let outcome = svc
+            .finalize_turn_cas(input)
+            .await
+            .expect("finalization should succeed");
+        assert!(outcome.won_cas);
+
+        assert_eq!(
+            metrics.code_interpreter_calls.load(Ordering::Relaxed),
+            1,
+            "should record code_interpreter_calls metric"
         );
     }
 
@@ -1346,6 +1418,65 @@ mod tests {
                     Some("quota exceeded".to_owned())
                 );
                 assert_eq!(evt.policy_version_applied, Some(1));
+            }
+            other => panic!("expected Turn event, got: {other:?}"),
+        }
+    }
+
+    // ── Token breakdown fields propagate through finalization ──
+
+    #[tokio::test]
+    async fn finalization_propagates_token_breakdown_fields() {
+        let db = mock_db_provider(inmem_db().await);
+        let (svc, outbox) = build_finalization_service(Arc::clone(&db));
+
+        let tenant_id = Uuid::new_v4();
+        let chat_id = Uuid::new_v4();
+        let turn_id = Uuid::new_v4();
+        let request_id = Uuid::new_v4();
+        let user_id = Uuid::new_v4();
+
+        insert_test_chat(&db, tenant_id, chat_id, user_id).await;
+        insert_running_turn(&db, tenant_id, chat_id, turn_id, request_id).await;
+
+        let mut input = make_input(
+            tenant_id,
+            chat_id,
+            turn_id,
+            request_id,
+            user_id,
+            TurnState::Completed,
+        );
+        input.usage = Some(Usage {
+            input_tokens: 100,
+            output_tokens: 50,
+            cache_read_input_tokens: 42,
+            cache_write_input_tokens: 17,
+            reasoning_tokens: 88,
+        });
+
+        svc.finalize_turn_cas(input).await.unwrap();
+
+        // ── Verify usage event ──
+        let usage_events = outbox.usage_events.lock().unwrap();
+        assert_eq!(usage_events.len(), 1);
+        let usage = usage_events[0]
+            .usage
+            .as_ref()
+            .expect("usage should be present");
+        assert_eq!(usage.cache_read_input_tokens, 42);
+        assert_eq!(usage.cache_write_input_tokens, 17);
+        assert_eq!(usage.reasoning_tokens, 88);
+        drop(usage_events);
+
+        // ── Verify audit event ──
+        let audit_events = outbox.audit_events();
+        assert_eq!(audit_events.len(), 1);
+        match &audit_events[0] {
+            AuditEnvelope::Turn(evt) => {
+                assert_eq!(evt.usage.cache_read_input_tokens, Some(42));
+                assert_eq!(evt.usage.cache_write_input_tokens, Some(17));
+                assert_eq!(evt.usage.reasoning_tokens, Some(88));
             }
             other => panic!("expected Turn event, got: {other:?}"),
         }
