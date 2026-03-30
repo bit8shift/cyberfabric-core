@@ -16,9 +16,8 @@
   - [3.3 API Contracts](#33-api-contracts)
   - [3.4 Interactions & Sequences](#34-interactions--sequences)
   - [3.5 Database schemas & tables](#35-database-schemas--tables)
-  - [3.6: Topology (optional)](#36-topology-optional)
-  - [3.7: Tech stack (optional)](#37-tech-stack-optional)
 - [4. Additional Context](#4-additional-context)
+  - [4.1 Quality Attribute Coverage](#41-quality-attribute-coverage)
 - [5. Traceability](#5-traceability)
 
 <!-- /toc -->
@@ -31,7 +30,7 @@ LLM Gateway provides unified access to multiple LLM providers. Consumers interac
 
 The external API follows the [Open Responses](https://www.openresponses.org/) protocol — an open specification based on the OpenAI Responses API. Open Responses uses an items-based response model where each response contains typed output items (message, function_call, reasoning) that are extensible via provider-specific item types. See [ADR-0005](./ADR/0005-cpt-cf-llm-gateway-adr-open-responses-protocol.md) for the protocol selection rationale.
 
-The architecture follows a pass-through design: Gateway normalizes requests and responses but does not interpret content or execute tools. Provider-specific adapters handle translation to/from each provider's native API format into the Open Responses protocol. All external calls route through Outbound API Gateway for credential injection and circuit breaking. Gateway also performs health-based routing using Model Registry metrics — see [ADR-0004](./ADR/0004-cpt-cf-llm-gateway-adr-circuit-breaking.md) for the distinction between infrastructure-level circuit breaking (OAGW) and business-level health routing (Gateway).
+Gateway normalizes requests and responses into the Open Responses protocol but does not interpret content or execute tools. Provider-specific adapters handle translation to/from each provider's native API format. All external calls route through Outbound API Gateway for credential injection and circuit breaking. Gateway also performs health-based routing using Model Registry metrics — see [ADR-0004](./ADR/0004-cpt-cf-llm-gateway-adr-circuit-breaking.md) for the distinction between infrastructure-level circuit breaking (OAGW) and business-level health routing (Gateway).
 
 The system is horizontally scalable and stateless for request processing — no conversation history is stored; consumers provide full context with each request. Server-side response storage (`store`) and conversation continuation (`previous_response_id`) from the Open Responses protocol are not supported — see [ADR-0007](./ADR/0007-cpt-cf-llm-gateway-adr-no-stored-responses.md) for rationale. Gateway does persist operational state in a database: async/batch job records (ID mappings, status, results) retained until their TTL expires. Guaranteed at-least-once delivery of usage records is handled by the Usage Tracker SDK.
 
@@ -49,7 +48,7 @@ See [PRD.md](./PRD.md) section 1 "Overview" — Key Problems Solved:
 | Cypilot ID | Solution short description |
 |--------|----------------------------|
 | `cpt-cf-llm-gateway-fr-chat-completion-v1` | Provider adapters + Outbound API GW |
-| `cpt-cf-llm-gateway-fr-streaming-v1` | SSE pass-through via adapters |
+| `cpt-cf-llm-gateway-fr-streaming-v1` | SSE streaming forwarded by adapters |
 | `cpt-cf-llm-gateway-fr-embeddings-v1` | Provider adapters + Outbound API GW |
 | `cpt-cf-llm-gateway-fr-vision-v1` | FileStorage fetch + provider adapters |
 | `cpt-cf-llm-gateway-fr-image-generation-v1` | Provider adapters + FileStorage store |
@@ -86,7 +85,7 @@ See [PRD.md](./PRD.md) section 1 "Overview" — Key Problems Solved:
 | ADR ID | Decision Summary |
 |--------|------------------|
 | `cpt-cf-llm-gateway-adr-stateless` | Stateless gateway design for horizontal scalability |
-| `cpt-cf-llm-gateway-adr-pass-through` | Pass-through content processing, no tool execution |
+| `cpt-cf-llm-gateway-adr-pass-through` | Content normalization without interpretation; tool execution is consumer responsibility |
 | `cpt-cf-llm-gateway-adr-file-storage` | FileStorage for all media handling |
 | `cpt-cf-llm-gateway-adr-circuit-breaking` | Circuit breaking at OAGW + health-based routing at Gateway |
 | `cpt-cf-llm-gateway-adr-open-responses-protocol` | Open Responses protocol for LLM completion requests |
@@ -126,13 +125,13 @@ graph LR
 
 Gateway does not store conversation history. Consumer provides full context with each request. Open Responses `store` parameter is forced to `false`; `previous_response_id` is not supported. Gateway does persist operational state: async/batch job records (retained until TTL expires). Guaranteed at-least-once delivery of usage records is handled by the Usage Tracker SDK.
 
-#### Pass-through
+#### Content Non-Interpretation
 
-**ID**: `cpt-cf-llm-gateway-principle-pass-through`
+**ID**: `cpt-cf-llm-gateway-principle-content-non-interpretation`
 
 **ADRs**: `cpt-cf-llm-gateway-adr-pass-through`
 
-Gateway normalizes but does not interpret content. Tool execution and response parsing are consumer responsibility.
+Gateway translates request and response formats between consumers and providers but does not interpret content semantics. Tool execution and response parsing are consumer responsibility.
 
 ### 2.2 Constraints
 
@@ -480,7 +479,7 @@ Gateway-specific error codes (mapped to Open Responses `code` field):
 | `budget_exceeded` | `invalid_request` | Tenant budget exhausted |
 | `rate_limited` | `too_many_requests` | Rate limit exceeded |
 | `request_blocked` | `invalid_request` | Blocked by pre-call hook |
-| `response_blocked` | `server_error` | Blocked by post-response hook |
+| `output_validation_error` | `model_error` | Provider output does not conform to requested JSON schema |
 | `provider_error` | `model_error` | Provider returned error |
 | `provider_timeout` | `server_error` | Provider request timed out |
 | `job_not_found` | `not_found` | Job ID does not exist |
@@ -549,6 +548,11 @@ Key streaming semantics:
 - Response lifecycle: created → queued → in_progress → completed | failed | incomplete
 - Provider-specific streaming events use extension format: `{provider_slug}:{event_type}`
 - CyberFabric extension events use `cyberfabric:` prefix: `cyberfabric:response.data.in_progress` (binary output started), `cyberfabric:response.data.done` (binary output completed with data)
+
+**Streaming-specific constraints**:
+- **No provider fallback after first delta**: Provider fallback (see `cpt-cf-llm-gateway-seq-provider-fallback-v1`) is only attempted before streaming begins. Once any delta event has been sent to the consumer, the stream is committed to the current provider — switching providers mid-stream is not possible.
+- **Consumer disconnect does not abort the provider request**: If the consumer disconnects, Gateway continues reading the provider stream to completion. This ensures token usage is fully reported to the Usage Tracker. The provider response is discarded after the stream closes.
+- **Usage is always requested from providers**: Gateway always sets `stream_options: {include_usage: true}` on provider requests regardless of the consumer's `stream_options` value. Token usage is required for billing. The consumer's `stream_options.include_usage` controls only whether the `response.completed` event exposes usage to the consumer — it does not affect what Gateway requests from the provider.
 
 #### Hook Plugin SDK Interface
 
@@ -887,6 +891,11 @@ sequenceDiagram
 
 Structured output is controlled via the `text.format` parameter using `json_schema` type.
 
+**Validation semantics**:
+- Gateway validates the provider's JSON output against the requested schema before returning the response.
+- On failure, `output_validation_error` is returned immediately — no retries.
+- For streaming requests (`stream: true`), schema validation is not enforced by Gateway — the schema is forwarded to the provider but the streamed output is not buffered and re-validated. Consumers must validate streamed output themselves.
+
 ```mermaid
 sequenceDiagram
     participant C as Consumer
@@ -900,7 +909,11 @@ sequenceDiagram
     P-->>OB: JSON response
     OB-->>GW: JSON response
     GW->>GW: Validate against schema
-    GW-->>C: ResponseResource (output_text with JSON + usage)
+    alt Validation fails
+        GW-->>C: output_validation_error
+    else Validation passes
+        GW-->>C: ResponseResource (output_text with JSON + usage)
+    end
 ```
 
 #### Document Understanding
