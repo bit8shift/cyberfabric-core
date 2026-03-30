@@ -334,7 +334,7 @@ RELATED:
 
 COMMAND generate-agents
 SYNOPSIS: python3 scripts/cypilot.py generate-agents --agent <name> [options]
-DESCRIPTION: Generate/update agent-specific workflow proxies and skill outputs. Creates unified proxy files for workflows (cypilot-generate, cypilot-analyze) and the cypilot skill entry point. Supports windsurf, cursor, claude, copilot, openai.
+DESCRIPTION: Generate/update agent-specific workflow proxies and skill outputs. Creates unified proxy files for workflows (cypilot-generate, cypilot-analyze, cypilot-plan, cypilot-workspace) and the cypilot skill entry point. Supports windsurf, cursor, claude, copilot, openai.
 ARGUMENTS:
 
 OPTIONS:

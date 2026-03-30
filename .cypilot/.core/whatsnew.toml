@@ -190,3 +190,11 @@ details = """\
 - **Unified CLAUDE.md injection** — `_inject_root_claude()` now reuses `_inject_managed_block()` for consistent block generation
 - **Variable description fix** — `{cypilot_path}` documentation updated to clarify it's resolved from root `AGENTS.md`\
 """
+
+["v3.2.2-beta"]
+summary = "Shared whatsnew handling, Claude skill routing cleanup"
+details = """\
+- **Shared whatsnew utility** — extracted core/kit whatsnew parsing, semantic version filtering, ANSI formatting, and acknowledgment prompts into `skills/cypilot/scripts/cypilot/utils/whatsnew.py`
+- **`cpt update` now shows kit release notes** — main update flow displays `whatsnew.toml` entries for installed kits before running `update_kit`; interactive users can skip a kit after reviewing changes
+- **Claude skill routing cleanup** — `generate-agents` now emits Claude entry points via `.claude/skills/.../SKILL.md`, removes replaced legacy `.claude/commands/*.md` shims, and reports deleted legacy files in the result summary
+"""

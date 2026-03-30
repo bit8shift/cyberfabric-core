@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from ..utils.ui import ui
+from ..utils.whatsnew import show_kit_whatsnew
 
 
 # ---------------------------------------------------------------------------
@@ -1154,6 +1155,30 @@ def cmd_kit_update(argv: List[str]) -> int:
     errors: List[str] = []
 
     for kit_slug, kit_source, github_source, tmp_dir in update_targets:
+        # @cpt-begin:cpt-cypilot-flow-kit-update-cli:p1:inst-show-whatsnew
+        # Show whatsnew entries before file-level diff (if whatsnew.toml exists)
+        if not args.dry_run:
+            installed_version = _read_kit_version_from_core(config_dir, kit_slug)
+            ack = show_kit_whatsnew(
+                kit_source,
+                installed_version,
+                kit_slug,
+                interactive=interactive and not args.yes,
+            )
+            if not ack:
+                # User aborted — skip this kit
+                all_results.append({
+                    "kit": kit_slug,
+                    "action": "aborted",
+                    "accepted": [],
+                    "declined": [],
+                    "files_written": 0,
+                })
+                if tmp_dir:
+                    shutil.rmtree(tmp_dir, ignore_errors=True)
+                continue
+        # @cpt-end:cpt-cypilot-flow-kit-update-cli:p1:inst-show-whatsnew
+
         try:
             # @cpt-begin:cpt-cypilot-flow-kit-update-cli:p1:inst-legacy-migration
             # Legacy manifest migration is handled inside update_kit() when
@@ -1196,7 +1221,7 @@ def cmd_kit_update(argv: List[str]) -> int:
     # @cpt-end:cpt-cypilot-flow-kit-update-cli:p1:inst-regen-gen
 
     # @cpt-begin:cpt-cypilot-flow-kit-update-cli:p1:inst-format-output
-    n_updated = sum(1 for r in all_results if r["action"] not in ("current", "dry_run", "ERROR"))
+    n_updated = sum(1 for r in all_results if r["action"] not in ("current", "dry_run", "ERROR", "aborted"))
     output: Dict[str, Any] = {
         "status": "PASS" if not errors else "WARN",
         "kits_updated": n_updated,

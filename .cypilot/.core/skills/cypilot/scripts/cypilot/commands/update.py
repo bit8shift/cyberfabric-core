@@ -26,7 +26,6 @@ Pipeline:
 # @cpt-begin:cpt-cypilot-flow-version-config-update:p1:inst-update-imports
 import argparse
 import json
-import re
 import shutil
 import sys
 from pathlib import Path
@@ -45,6 +44,7 @@ from .init import (
     _inject_root_claude,
 )
 from ..utils.ui import ui
+from ..utils.whatsnew import read_whatsnew, show_core_whatsnew, show_kit_whatsnew
 # @cpt-end:cpt-cypilot-flow-version-config-update:p1:inst-update-imports
 
 def cmd_update(argv: List[str]) -> int:
@@ -134,10 +134,10 @@ def cmd_update(argv: List[str]) -> int:
 
     # ── Show core whatsnew (before .core/ is replaced) ────────────────────
     if not args.dry_run:
-        cache_whatsnew = _read_core_whatsnew(CACHE_DIR / "whatsnew.toml")
-        core_whatsnew = _read_core_whatsnew(core_dir / "whatsnew.toml")
+        cache_whatsnew = read_whatsnew(CACHE_DIR / "whatsnew.toml")
+        core_whatsnew = read_whatsnew(core_dir / "whatsnew.toml")
         if cache_whatsnew:
-            ack = _show_core_whatsnew(
+            ack = show_core_whatsnew(
                 cache_whatsnew, core_whatsnew,
                 interactive=not args.no_interactive and not args.yes and sys.stdin.isatty(),
             )
@@ -225,6 +225,7 @@ def cmd_update(argv: List[str]) -> int:
     from .kit import (
         update_kit, regenerate_gen_aggregates,
         _read_kits_from_core_toml, _parse_github_source, _download_kit_from_github,
+        _read_kit_version_from_core,
         migrate_legacy_kit_to_manifest,
     )
 
@@ -257,6 +258,24 @@ def cmd_update(argv: List[str]) -> int:
 
         if kit_src is None:
             continue
+
+        if not args.dry_run:
+            installed_version = _read_kit_version_from_core(config_dir, kit_slug)
+            ack = show_kit_whatsnew(
+                kit_src,
+                installed_version,
+                kit_slug,
+                interactive=interactive and not args.yes,
+            )
+            if not ack:
+                kit_r = {
+                    "kit": kit_slug,
+                    "version": {"status": "aborted"},
+                    "gen": {"files_written": 0},
+                    "gen_rejected": [],
+                }
+                kit_results[kit_slug] = kit_r
+                continue
 
         try:
             kit_r = update_kit(
@@ -337,6 +356,8 @@ def cmd_update(argv: List[str]) -> int:
                 ui.substep(f"      ~ {fp}")
             for fp in rejected:
                 ui.substep(f"      ✗ {fp} (declined)")
+        elif ver_status == "aborted":
+            ui.substep(f"{kit_slug}: skipped by user")
         elif ver_status == "current":
             ui.substep(f"{kit_slug}: up to date")
 
@@ -802,89 +823,6 @@ def _migrate_kit_sources(config_dir: Path) -> Dict[str, str]:
 
 # Re-exported from kit.py — tests import it from here
 from .kit import _read_conf_version as _read_conf_version  # noqa: F401
-
-def _read_core_whatsnew(path: Path) -> Dict[str, Dict[str, str]]:
-    """Read a standalone whatsnew.toml file.
-
-    Returns dict mapping version string to {summary, details}.
-    """
-    if not path.is_file():
-        return {}
-    try:
-        import tomllib
-        with open(path, "rb") as f:
-            data = tomllib.load(f)
-    except Exception:
-        return {}
-    result: Dict[str, Dict[str, str]] = {}
-    for key, entry in data.items():
-        if isinstance(entry, dict):
-            result[key] = {
-                "summary": str(entry.get("summary", "")),
-                "details": str(entry.get("details", "")),
-            }
-    return result
-
-
-def _stderr_supports_ansi() -> bool:
-    return hasattr(sys.stderr, "isatty") and sys.stderr.isatty()
-
-
-def _format_whatsnew_text(text: str, *, use_ansi: bool) -> str:
-    if use_ansi:
-        formatted = re.sub(r"\*\*(.+?)\*\*", r"\033[1m\1\033[0m", text)
-        return re.sub(r"`(.+?)`", r"\033[36m\1\033[0m", formatted)
-    plain = re.sub(r"\*\*(.+?)\*\*", r"\1", text)
-    return re.sub(r"`(.+?)`", r"\1", plain)
-
-
-def _show_core_whatsnew(
-    ref_whatsnew: Dict[str, Dict[str, str]],
-    core_whatsnew: Dict[str, Dict[str, str]],
-    *,
-    interactive: bool = True,
-) -> bool:
-    """Display core whatsnew entries present in cache but missing from .core/.
-
-    Returns True if user acknowledged (or non-interactive), False if declined.
-    """
-    missing = sorted(
-        (v, ref_whatsnew[v]) for v in ref_whatsnew
-        if v not in core_whatsnew
-    )
-    if not missing:
-        return True
-
-    sys.stderr.write(f"\n{'=' * 60}\n")
-    sys.stderr.write(f"  What's new in Cypilot\n")
-    sys.stderr.write(f"{'=' * 60}\n")
-
-    use_ansi = _stderr_supports_ansi()
-    for ver, entry in missing:
-        summary = _format_whatsnew_text(entry["summary"], use_ansi=use_ansi)
-        if use_ansi and summary == entry["summary"]:
-            sys.stderr.write(f"\n  \033[1m{ver}: {entry['summary']}\033[0m\n")
-        else:
-            version_label = f"\033[1m{ver}:\033[0m" if use_ansi else f"{ver}:"
-            sys.stderr.write(f"\n  {version_label} {summary}\n")
-        if entry["details"]:
-            for line in entry["details"].splitlines():
-                sys.stderr.write(
-                    f"    {_format_whatsnew_text(line, use_ansi=use_ansi)}\n"
-                )
-
-    sys.stderr.write(f"\n{'=' * 60}\n")
-
-    if not interactive:
-        return True
-
-    sys.stderr.write("  Press Enter to continue with update (or 'q' to abort): ")
-    sys.stderr.flush()
-    try:
-        response = input().strip().lower()
-    except EOFError:
-        return False
-    return response != "q"
 # @cpt-end:cpt-cypilot-flow-version-config-update:p1:inst-update-helpers
 
 # ---------------------------------------------------------------------------
