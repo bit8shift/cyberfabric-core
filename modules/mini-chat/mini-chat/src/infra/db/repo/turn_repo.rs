@@ -45,6 +45,7 @@ impl crate::domain::repos::TurnRepository for TurnRepository {
             policy_version_applied: Set(params.policy_version_applied),
             effective_model: Set(params.effective_model),
             minimal_generation_floor_applied: Set(params.minimal_generation_floor_applied),
+            web_search_enabled: Set(params.web_search_enabled),
             deleted_at: Set(None),
             replaced_by_request_id: Set(None),
             started_at: Set(now),
@@ -437,6 +438,7 @@ mod tests {
                 policy_version_applied: Some(1),
                 effective_model: Some("gpt-5.2".to_owned()),
                 minimal_generation_floor_applied: Some(10),
+                web_search_enabled: false,
             },
         )
         .await

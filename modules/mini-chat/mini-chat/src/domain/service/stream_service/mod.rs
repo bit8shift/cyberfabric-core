@@ -434,6 +434,7 @@ impl<
                 requester_type,
                 content.clone(),
                 attachment_ids,
+                web_search_enabled,
             )
             .await?;
 
@@ -564,6 +565,7 @@ impl<
         requester_type: String,
         content: String,
         attachment_ids: Vec<Uuid>,
+        web_search_enabled: bool,
     ) -> Result<Uuid, StreamError> {
         let user_msg_id = Uuid::new_v4();
         let turn_id = Uuid::new_v4();
@@ -732,6 +734,7 @@ impl<
                                 minimal_generation_floor_applied: Some(
                                     minimal_generation_floor_applied,
                                 ),
+                                web_search_enabled,
                             },
                         )
                         .await
@@ -2068,6 +2071,7 @@ mod tests {
                     policy_version_applied: None,
                     effective_model: None,
                     minimal_generation_floor_applied: None,
+                    web_search_enabled: false,
                 },
             )
             .await
@@ -2149,6 +2153,7 @@ mod tests {
                     policy_version_applied: None,
                     effective_model: None,
                     minimal_generation_floor_applied: None,
+                    web_search_enabled: false,
                 },
             )
             .await
@@ -2214,6 +2219,7 @@ mod tests {
                     policy_version_applied: None,
                     effective_model: None,
                     minimal_generation_floor_applied: None,
+                    web_search_enabled: false,
                 },
             )
             .await
@@ -2295,6 +2301,7 @@ mod tests {
                     policy_version_applied: None,
                     effective_model: None,
                     minimal_generation_floor_applied: None,
+                    web_search_enabled: false,
                 },
             )
             .await
@@ -2376,6 +2383,7 @@ mod tests {
                     policy_version_applied: None,
                     effective_model: None,
                     minimal_generation_floor_applied: None,
+                    web_search_enabled: false,
                 },
             )
             .await
@@ -3010,6 +3018,7 @@ mod tests {
                     policy_version_applied: Some(1),
                     effective_model: Some("gpt-4o-mini".to_owned()),
                     minimal_generation_floor_applied: Some(50),
+                    web_search_enabled: false,
                 },
             )
             .await
@@ -4687,6 +4696,7 @@ mod tests {
             policy_version_applied: Set(None),
             effective_model: Set(None),
             minimal_generation_floor_applied: Set(None),
+            web_search_enabled: Set(false),
             deleted_at: Set(None),
             replaced_by_request_id: Set(None),
             started_at: Set(now),

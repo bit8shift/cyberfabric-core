@@ -950,6 +950,7 @@ mod tests {
                     policy_version_applied: Some(1),
                     effective_model: Some("gpt-5.2".to_owned()),
                     minimal_generation_floor_applied: Some(10),
+                    web_search_enabled: false,
                 },
             )
             .await

@@ -23,6 +23,7 @@ pub struct CreateTurnParams {
     pub policy_version_applied: Option<i64>,
     pub effective_model: Option<String>,
     pub minimal_generation_floor_applied: Option<i32>,
+    pub web_search_enabled: bool,
 }
 
 /// Parameters for CAS update to completed state.
