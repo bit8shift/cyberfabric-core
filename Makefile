@@ -330,6 +330,8 @@ openapi:
 	echo "Fetching OpenAPI spec..."; \
 	mkdir -p $$(dirname "$(OPENAPI_OUT)"); \
 	curl -fsS "$(OPENAPI_URL)" -o "$(OPENAPI_OUT)"; \
+	echo "Sorting OpenAPI JSON for deterministic ordering..."; \
+	python3 scripts/sort_openapi_json.py "$(OPENAPI_OUT)"; \
 	echo "OpenAPI spec saved to $(OPENAPI_OUT)"
 
 # -------- Development and auto fix --------
