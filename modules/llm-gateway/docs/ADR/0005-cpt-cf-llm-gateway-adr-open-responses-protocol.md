@@ -5,6 +5,25 @@ date: 2026-03-12
 
 # ADR-0005: Adopt Open Responses Protocol for LLM Completion Requests
 
+<!-- toc -->
+
+- [Context and Problem Statement](#context-and-problem-statement)
+- [Decision Drivers](#decision-drivers)
+- [Considered Options](#considered-options)
+- [Decision Outcome](#decision-outcome)
+  - [Consequences](#consequences)
+  - [Confirmation](#confirmation)
+- [Pros and Cons of the Options](#pros-and-cons-of-the-options)
+  - [OpenAI Chat Completions API](#openai-chat-completions-api)
+  - [Custom CyberFabric API](#custom-cyberfabric-api)
+  - [Vendor-specific API (OpenAI, Anthropic, or other)](#vendor-specific-api-openai-anthropic-or-other)
+  - [Open Responses Protocol](#open-responses-protocol)
+- [More Information](#more-information)
+  - [Provider Parameter Extensions](#provider-parameter-extensions)
+- [Traceability](#traceability)
+
+<!-- /toc -->
+
 **ID**: `cpt-cf-llm-gateway-adr-open-responses-protocol`
 
 ## Context and Problem Statement
@@ -107,7 +126,7 @@ An open specification based on OpenAI's Responses API design, governed as an ope
 
 The Open Responses protocol emerged as an effort to standardize the richer response model that providers are converging on. Unlike the legacy Chat Completions API which returns a single message per choice, Open Responses returns a list of typed output items — enabling first-class representation of reasoning traces, internal tool invocations, citations, and other structured outputs that newer models produce.
 
-This decision aligns with the Gateway's pass-through design principle (`cpt-cf-llm-gateway-principle-pass-through`): the protocol's item-based structure allows the Gateway to forward provider-specific items transparently without needing to interpret their content.
+This decision aligns with the Gateway's pass-through design principle (`cpt-cf-llm-gateway-adr-pass-through`): the protocol's item-based structure allows the Gateway to forward provider-specific items transparently without needing to interpret their content.
 
 ### Provider Parameter Extensions
 

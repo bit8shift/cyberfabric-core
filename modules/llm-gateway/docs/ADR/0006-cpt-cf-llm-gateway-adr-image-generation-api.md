@@ -5,6 +5,22 @@ date: 2026-03-18
 
 # ADR-0006: Use Responses API with Custom Extensions for Image Generation
 
+<!-- toc -->
+
+- [Context and Problem Statement](#context-and-problem-statement)
+- [Decision Drivers](#decision-drivers)
+- [Considered Options](#considered-options)
+- [Decision Outcome](#decision-outcome)
+  - [Consequences](#consequences)
+  - [Confirmation](#confirmation)
+- [Pros and Cons of the Options](#pros-and-cons-of-the-options)
+  - [Dedicated Image Generation API (based on OpenAI `/images/generations`)](#dedicated-image-generation-api-based-on-openai-imagesgenerations)
+  - [Responses API with custom CyberFabric extensions](#responses-api-with-custom-cyberfabric-extensions)
+- [More Information](#more-information)
+- [Traceability](#traceability)
+
+<!-- /toc -->
+
 **ID**: `cpt-cf-llm-gateway-adr-image-generation-api`
 
 ## Context and Problem Statement
@@ -100,7 +116,7 @@ The `cyberfabric:data` output item carries binary output with the following fiel
 | `base64` | string or null | Base64-encoded data (when `response_format` is `base64`) |
 | `url` | string or null | File storage URL (when `response_format` is `url`) |
 
-This decision aligns with the Gateway's pass-through design principle (`cpt-cf-llm-gateway-principle-pass-through`): provider adapters translate between the `cyberfabric:image_generation` tool and each provider's native image generation API, while the API layer treats the tool and output items as opaque typed items.
+This decision aligns with the Gateway's pass-through design principle (`cpt-cf-llm-gateway-adr-pass-through`): provider adapters translate between the `cyberfabric:image_generation` tool and each provider's native image generation API, while the API layer treats the tool and output items as opaque typed items.
 
 ## Traceability
 

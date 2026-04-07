@@ -1,3 +1,5 @@
+<!-- Updated: 2026-04-07 by Constructor Tech -->
+
 # ModKit Architecture & Developer Guide
 
 This folder contains the ModKit developer documentation, split by topic for focused reading and LLM retrieval.

@@ -1,10 +1,5 @@
----
-status: accepted
-date: 2026-03-06
-decision_owner: Platform Engineering
-approver: Architecture Review Board
-scope: usage-collector-sdk ScopedUsageCollectorClientV1 API; all platform modules that emit usage records
----
+<!-- Updated: 2026-04-07 by Constructor Tech -->
+
 # ADR-0002: Two-Phase PDP Authorization for Usage Record Emission
 
 

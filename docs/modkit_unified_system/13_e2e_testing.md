@@ -1,3 +1,5 @@
+<!-- Created: 2026-04-07 by Constructor Tech -->
+
 # E2E Testing Guide
 
 This document defines the philosophy, infrastructure, and patterns for end-to-end (E2E) tests across all ModKit modules. Module-specific test plans (which seams to test, actual test implementations) live in each module's `docs/features/` folder and `testing/e2e/modules/<module>/`.

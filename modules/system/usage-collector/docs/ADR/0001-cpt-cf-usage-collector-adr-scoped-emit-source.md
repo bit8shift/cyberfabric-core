@@ -1,10 +1,5 @@
----
-status: accepted
-date: 2026-03-06
-decision_owner: Platform Engineering
-approver: Architecture Review Board
-scope: usage-collector-sdk; all platform modules integrating usage metering
----
+<!-- Updated: 2026-04-07 by Constructor Tech -->
+
 # ADR-0001: Use `for_module()` Scoped Client for Metric Source Attribution
 
 

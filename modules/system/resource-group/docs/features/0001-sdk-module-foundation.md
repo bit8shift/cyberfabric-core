@@ -1,3 +1,5 @@
+<!-- Created: 2026-04-07 by Constructor Tech -->
+
 # Feature: SDK Contracts, Error Types & Module Foundation
 
 - [x] `p1` - **ID**: `cpt-cf-resource-group-featstatus-sdk-module-foundation`

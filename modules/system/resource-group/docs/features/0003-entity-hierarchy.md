@@ -1,3 +1,5 @@
+<!-- Created: 2026-04-07 by Constructor Tech -->
+
 # Feature: Group Entity & Hierarchy Engine
 
 - [x] `p1` - **ID**: `cpt-cf-resource-group-featstatus-entity-hierarchy`

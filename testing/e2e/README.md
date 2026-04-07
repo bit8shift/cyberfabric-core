@@ -1,3 +1,5 @@
+<!-- Updated: 2026-04-07 by Constructor Tech -->
+
 # E2E Testing Guide
 
 This directory contains end-to-end tests for the Hyperspot server.

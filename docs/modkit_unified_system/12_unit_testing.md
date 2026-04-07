@@ -1,3 +1,5 @@
+<!-- Created: 2026-04-07 by Constructor Tech -->
+
 # Unit & Integration Testing Guide
 
 This document defines the philosophy, infrastructure, and patterns for unit and integration tests across all ModKit modules. Module-specific test plans (which test cases to add, gap analysis, domain-specific assertions) live in each module's `docs/features/` folder.

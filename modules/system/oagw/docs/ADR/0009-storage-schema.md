@@ -1,8 +1,4 @@
----
-status: proposed
-date: 2026-02-23
-decision-makers: OAGW Team
----
+<!-- Updated: 2026-04-07 by Constructor Tech -->
 
 # Storage Schema — Portable Relational Baseline with JSON Blobs
 

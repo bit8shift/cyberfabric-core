@@ -1,3 +1,5 @@
+<!-- Created: 2026-04-07 by Constructor Tech -->
+
 # Feature: GTS Type Management
 
 - [x] `p1` - **ID**: `cpt-cf-resource-group-featstatus-type-management`

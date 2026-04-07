@@ -1,3 +1,5 @@
+<!-- Created: 2026-04-07 by Constructor Tech -->
+
 # Decomposition: Resource Group (RG)
 
 **Overall implementation status:**

@@ -1,3 +1,4 @@
+# Updated: 2026-04-07 by Constructor Tech
 """
 Unified TOC (Table of Contents) generation for Markdown files.
 

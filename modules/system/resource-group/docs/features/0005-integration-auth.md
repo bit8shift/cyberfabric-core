@@ -1,3 +1,5 @@
+<!-- Created: 2026-04-07 by Constructor Tech -->
+
 # Feature: Integration Read Port & Dual Authentication Modes
 
 - [x] `p1` - **ID**: `cpt-cf-resource-group-featstatus-integration-auth`

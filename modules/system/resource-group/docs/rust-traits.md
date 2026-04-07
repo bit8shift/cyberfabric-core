@@ -1,3 +1,5 @@
+<!-- Updated: 2026-04-07 by Constructor Tech -->
+
 # Rust SDK Contracts — Resource Group
 
 > Reference document for planned Rust trait contracts and SDK types.

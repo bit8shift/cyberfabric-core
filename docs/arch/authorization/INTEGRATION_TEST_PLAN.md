@@ -1,3 +1,5 @@
+<!-- Created: 2026-04-07 by Constructor Tech -->
+
 # AuthZ + Resource Group Integration Test Plan
 
 Design-time test plan for verifying the RG ↔ AuthZ interaction locally in hyperspot-server. Covers three phases: tenant scoping, group-based predicates, and MTLS bypass.
@@ -199,7 +201,7 @@ WHERE owner_tenant_id IN ('T1')
 ### What remains for production use
 
 - **RG-aware AuthZ plugin**: static-authz-plugin currently only returns tenant predicates. A real plugin needs to resolve user→group access from an external policy source and emit `InGroup`/`InGroupSubtree` predicates
-- **Domain entity integration**: consuming modules may project `resource_group_closure` for hierarchy queries. `resource_group_membership` is **not projected** to domain services (too large) — it stays in the RG module's database only. Domain services rely on PDP capability degradation: PDP resolves group memberships and returns explicit resource IDs via `in` predicates
+- **Domain entity integration**: consuming modules may project `resource_group` + `resource_group_closure` for hierarchy queries. `resource_group_membership` projection should only be added when profiling confirms the two-request pattern (RG Membership API → domain service) causes unacceptable latency — this table is 10×+ larger than other projections. In a monolith with a shared DB, no projections are needed at all. By default, domain services rely on PDP capability degradation: PDP resolves group memberships and returns explicit resource IDs via `in` predicates
 
 ---
 

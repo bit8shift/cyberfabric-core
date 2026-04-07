@@ -5,6 +5,23 @@ date: 2026-03-26
 
 # ADR-0007: Do Not Support Stored Responses or Server-Side Conversation State
 
+<!-- toc -->
+
+- [Context and Problem Statement](#context-and-problem-statement)
+- [Decision Drivers](#decision-drivers)
+- [Considered Options](#considered-options)
+- [Decision Outcome](#decision-outcome)
+  - [Consequences](#consequences)
+  - [Confirmation](#confirmation)
+- [Pros and Cons of the Options](#pros-and-cons-of-the-options)
+  - [Full support for stored responses](#full-support-for-stored-responses)
+  - [Partial support (OpenAI pass-through only)](#partial-support-openai-pass-through-only)
+  - [No support for stored responses](#no-support-for-stored-responses)
+- [More Information](#more-information)
+- [Traceability](#traceability)
+
+<!-- /toc -->
+
 **ID**: `cpt-cf-llm-gateway-adr-no-stored-responses`
 
 ## Context and Problem Statement
