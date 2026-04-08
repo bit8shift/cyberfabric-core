@@ -147,9 +147,15 @@ pub(super) fn spawn_provider_task<TR: TurnRepository + 'static, MR: MessageRepos
 
         let request = builder.build_streaming();
 
+        // Use a child token for the provider HTTP stream so that calling
+        // provider_stream.cancel() in tool-limit-exceeded branches only stops
+        // the provider without cancelling the parent token used by SseRelay.
+        // Client-disconnect cancellation still propagates via the token hierarchy.
+        let provider_cancel = cancel.child_token();
+
         // Call the provider to start streaming
         let stream_result = llm
-            .stream(ctx, request, &upstream_alias, cancel.clone())
+            .stream(ctx, request, &upstream_alias, provider_cancel)
             .await;
 
         let mut provider_stream = match stream_result {
@@ -329,6 +335,10 @@ pub(super) fn spawn_provider_task<TR: TurnRepository + 'static, MR: MessageRepos
                                             let code = "web_search_calls_exceeded".to_owned();
                                             let message = "Web search calls exceeded for this message".to_owned();
 
+                                            // Cancel provider first so it stops executing the
+                                            // over-limit tool call during the finalization await.
+                                            provider_stream.cancel();
+
                                             // Finalize as failed, then emit error (D3)
                                             if let Some(ref fctx) = fin_ctx {
                                                 let input = fctx.to_finalization_input(
@@ -365,8 +375,6 @@ pub(super) fn spawn_provider_task<TR: TurnRepository + 'static, MR: MessageRepos
                                                     message,
                                                 })).await;
                                             }
-
-                                            provider_stream.cancel();
 
                                             // Metrics: web search limit exceeded
                                             if let Some(ref fctx) = fin_ctx {
@@ -429,6 +437,10 @@ pub(super) fn spawn_provider_task<TR: TurnRepository + 'static, MR: MessageRepos
                                             let code = "code_interpreter_calls_exceeded".to_owned();
                                             let message = "Code interpreter calls exceeded for this message".to_owned();
 
+                                            // Cancel provider first so it stops executing the
+                                            // over-limit tool call during the finalization await.
+                                            provider_stream.cancel();
+
                                             if let Some(ref fctx) = fin_ctx {
                                                 let input = fctx.to_finalization_input(
                                                     TurnState::Failed,
@@ -464,8 +476,6 @@ pub(super) fn spawn_provider_task<TR: TurnRepository + 'static, MR: MessageRepos
                                                     message,
                                                 })).await;
                                             }
-
-                                            provider_stream.cancel();
 
                                             if let Some(ref fctx) = fin_ctx {
                                                 let ms = stream_start.elapsed().as_secs_f64() * 1000.0;
