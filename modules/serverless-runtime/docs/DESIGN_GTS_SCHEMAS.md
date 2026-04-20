@@ -6,16 +6,65 @@ Contains all formal GTS JSON Schema definitions extracted from the design docume
 Each schema is preserved exactly as defined in the original design, grouped by entity.
 -->
 
+## Implementation Notes
+
+### Extension Mechanism Policy
+
+Several schemas in this document use `additionalProperties: false` at the top level combined with a `metadata: { additionalProperties: true }` property for extension data. This pattern is intentional and follows a consistent policy:
+
+- **`additionalProperties: false`** on the base schema prevents uncontrolled field sprawl. Unknown top-level fields are rejected at validation time.
+- **`metadata: { additionalProperties: true }`** provides a single, well-known extension point for runtime-opaque data. Adapters and plugins use `metadata` to store adapter-specific configuration that the platform passes through without validation.
+- **GTS `allOf` derivation** (e.g., Starlark Limits extending base Limits) adds **typed** fields to derived schemas. These fields are validated against the derived schema and are first-class properties, not opaque bags.
+
+The distinction: use `metadata` for runtime-opaque adapter data that the platform does not need to understand or validate. Use GTS `allOf` derivation for typed extensions where the platform validates the additional fields against a registered schema. Do not mix the two mechanisms on the same set of fields — `metadata` is the escape hatch for genuinely unstructured data; `allOf` is for structured, validated extensions.
+
+### Shared CallableBase (Rust Implementation)
+
+The Function and Workflow GTS schemas are independent sibling types with no `allOf`/`$ref` relationship (see [ADR-0001](ADR/0001-cpt-cf-serverless-runtime-adr-callable-type-hierarchy.md)). This means the JSON schemas intentionally duplicate ~130 lines of shared base fields (`version`, `tenant_id`, `owner`, `status`, `tags`, `title`, `description`, `schema`, `traits`, `implementation`, `created_at`, `updated_at`).
+
+The GTS schemas must remain independent for correct type matching and routing. However, the **Rust implementation** should use a shared `CallableBase` struct via composition to avoid code duplication:
+
+```rust
+/// Shared base fields for functions and workflows.
+/// GTS schemas stay independent; this struct exists only in the Rust SDK.
+pub struct CallableBase {
+    pub version: String,
+    pub tenant_id: String,
+    pub owner: OwnerRef,
+    pub status: LifecycleStatus,
+    pub tags: Vec<String>,
+    pub title: String,
+    pub description: Option<String>,
+    pub schema: IoSchema,
+    pub traits: CallableTraits,
+    pub implementation: Implementation,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+pub struct FunctionDefinition {
+    pub base: CallableBase,
+    // Function has no additional fields beyond CallableBase
+}
+
+pub struct WorkflowDefinition {
+    pub base: CallableBase,
+    pub workflow_traits: WorkflowTraits,
+}
+```
+
+Serialization to/from GTS JSON flattens the `base` fields into the top-level object so the wire format matches the GTS schema exactly. The `CallableBase` struct is an SDK-internal implementation detail not visible in the GTS schemas.
+
 ## Shared Components
 
 ### OwnerRef
 
-**GTS ID:** `gts.x.core.serverless.owner_ref.v1~`
+**GTS ID:** `gts.x.core.sless.owner_ref.v1~`
 
 ```json
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "gts://gts.x.core.serverless.owner_ref.v1~",
+  "$id": "gts://gts.x.core.sless.owner_ref.v1~",
   "title": "Owner Reference",
   "description": "Ownership reference. owner_type determines default visibility: user=private, tenant=tenant-visible, system=platform-provided.",
   "type": "object",
@@ -45,12 +94,12 @@ Each schema is preserved exactly as defined in the original design, grouped by e
 
 ### IOSchema
 
-**GTS ID:** `gts.x.core.serverless.io_schema.v1~`
+**GTS ID:** `gts.x.core.sless.io_schema.v1~`
 
 ```json
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "gts://gts.x.core.serverless.io_schema.v1~",
+  "$id": "gts://gts.x.core.sless.io_schema.v1~",
   "title": "IO Schema",
   "description": "Input/output contract. params/returns accept JSON Schema, GTS $ref, or null for void.",
   "type": "object",
@@ -92,14 +141,14 @@ Each schema is preserved exactly as defined in the original design, grouped by e
 
 ### Limits (Base)
 
-**GTS ID:** `gts.x.core.serverless.limits.v1~`
+**GTS ID:** `gts.x.core.sless.limits.v1~`
 
 ```json
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "gts://gts.x.core.serverless.limits.v1~",
+  "$id": "gts://gts.x.core.sless.limits.v1~",
   "title": "Function Limits (Base)",
-  "description": "Base limits schema. Adapters derive type-specific schemas via GTS inheritance.",
+  "description": "Base limits schema. Adapters derive type-specific schemas via GTS inheritance. Use the 'metadata' property for adapter-specific extension points.",
   "type": "object",
   "properties": {
     "timeout_seconds": {
@@ -113,25 +162,30 @@ Each schema is preserved exactly as defined in the original design, grouped by e
       "minimum": 1,
       "default": 100,
       "description": "Max concurrent invocations."
+    },
+    "metadata": {
+      "type": "object",
+      "description": "Extension point for derived adapter-specific limit fields. Structure is defined per adapter type.",
+      "additionalProperties": true
     }
   },
-  "additionalProperties": true
+  "additionalProperties": false
 }
 ```
 
-### Starlark Adapter Limits
+### Starlark Runtime Limits
 
-**GTS ID:** `gts.x.core.serverless.limits.v1~x.core.serverless.adapter.starlark.limits.v1~`
+**GTS ID:** `gts.x.core.sless.limits.v1~x.core.sless.runtime.starlark.limits.v1~`
 
 ```json
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "gts://gts.x.core.serverless.limits.v1~x.core.serverless.adapter.starlark.limits.v1~",
-  "title": "Starlark Adapter Limits",
+  "$id": "gts://gts.x.core.sless.limits.v1~x.core.sless.runtime.starlark.limits.v1~",
+  "title": "Starlark Runtime Limits",
   "description": "Limits for Starlark embedded runtime.",
   "allOf": [
     {
-      "$ref": "gts://gts.x.core.serverless.limits.v1~"
+      "$ref": "gts://gts.x.core.sless.limits.v1~"
     },
     {
       "type": "object",
@@ -156,19 +210,19 @@ Each schema is preserved exactly as defined in the original design, grouped by e
 }
 ```
 
-### Lambda Adapter Limits
+### Lambda Runtime Limits
 
-**GTS ID:** `gts.x.core.serverless.limits.v1~x.core.serverless.adapter.lambda.limits.v1~`
+**GTS ID:** `gts.x.core.sless.limits.v1~x.core.sless.runtime.lambda.limits.v1~`
 
 ```json
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "gts://gts.x.core.serverless.limits.v1~x.core.serverless.adapter.lambda.limits.v1~",
-  "title": "Lambda Adapter Limits",
-  "description": "Limits for AWS Lambda adapter. CPU is derived from memory tier.",
+  "$id": "gts://gts.x.core.sless.limits.v1~x.core.sless.runtime.lambda.limits.v1~",
+  "title": "Lambda Runtime Limits",
+  "description": "Limits for AWS Lambda runtime. CPU is derived from memory tier.",
   "allOf": [
     {
-      "$ref": "gts://gts.x.core.serverless.limits.v1~"
+      "$ref": "gts://gts.x.core.sless.limits.v1~"
     },
     {
       "type": "object",
@@ -195,12 +249,12 @@ Each schema is preserved exactly as defined in the original design, grouped by e
 
 ### RetryPolicy
 
-**GTS ID:** `gts.x.core.serverless.retry_policy.v1~`
+**GTS ID:** `gts.x.core.sless.retry_policy.v1~`
 
 ```json
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "gts://gts.x.core.serverless.retry_policy.v1~",
+  "$id": "gts://gts.x.core.sless.retry_policy.v1~",
   "title": "Retry Policy",
   "description": "Retry configuration for failed invocations.",
   "type": "object",
@@ -241,27 +295,34 @@ Each schema is preserved exactly as defined in the original design, grouped by e
 
 ### RateLimit (Base)
 
-**GTS ID:** `gts.x.core.serverless.rate_limit.v1~`
+**GTS ID:** `gts.x.core.sless.rate_limit.v1~`
 
 ```json
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "gts://gts.x.core.serverless.rate_limit.v1~",
+  "$id": "gts://gts.x.core.sless.rate_limit.v1~",
   "title": "Rate Limit (Base)",
-  "description": "Base rate limiting type. Empty marker — strategy-specific configuration is defined by derived types.",
+  "description": "Base rate limiting type. Empty marker — strategy-specific configuration is defined by derived types. Use the 'metadata' property for strategy-specific extension points.",
   "type": "object",
-  "additionalProperties": true
+  "properties": {
+    "metadata": {
+      "type": "object",
+      "description": "Extension point for derived rate-limit strategy fields. Structure is defined per strategy type.",
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": false
 }
 ```
 
 ### Token Bucket Rate Limit Config
 
-**GTS ID:** `gts.x.core.serverless.rate_limit.v1~x.core.serverless.rate_limit.token_bucket.v1~`
+**GTS ID:** `gts.x.core.sless.rate_limit.v1~x.core.sless.rate_limit.token_bucket.v1~`
 
 ```json
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "gts://gts.x.core.serverless.rate_limit.v1~x.core.serverless.rate_limit.token_bucket.v1~",
+  "$id": "gts://gts.x.core.sless.rate_limit.v1~x.core.sless.rate_limit.token_bucket.v1~",
   "title": "Token Bucket Rate Limit Config",
   "description": "Config schema for the system-default token bucket rate limiter. Per-second and per-minute limits enforced independently.",
   "type": "object",
@@ -292,20 +353,20 @@ Each schema is preserved exactly as defined in the original design, grouped by e
 
 ### Implementation
 
-**GTS ID:** `gts.x.core.serverless.implementation.v1~`
+**GTS ID:** `gts.x.core.sless.implementation.v1~`
 
 ```json
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "gts://gts.x.core.serverless.implementation.v1~",
+  "$id": "gts://gts.x.core.sless.implementation.v1~",
   "title": "Function Implementation",
-  "description": "Implementation definition with explicit adapter for limits validation.",
+  "description": "Implementation definition with explicit runtime for limits validation.",
   "type": "object",
   "properties": {
     "adapter": {
       "type": "string",
-      "x-gts-ref": "gts.x.core.serverless.adapter.*",
-      "description": "GTS type ID of the adapter (e.g., gts.x.core.serverless.adapter.starlark.v1~)."
+      "x-gts-ref": "gts.x.core.sless.runtime.*",
+      "description": "GTS type ID of the runtime (e.g., gts.x.core.sless.runtime.starlark.v1~)."
     }
   },
   "required": [
@@ -378,7 +439,7 @@ Each schema is preserved exactly as defined in the original design, grouped by e
           "properties": {
             "definition_id": {
               "type": "string",
-              "description": "Adapter-specific definition identifier."
+              "description": "Runtime-specific definition identifier."
             }
           },
           "required": [
@@ -399,25 +460,25 @@ Each schema is preserved exactly as defined in the original design, grouped by e
 
 ### WorkflowTraits
 
-**GTS ID:** `gts.x.core.serverless.workflow_traits.v1~`
+**GTS ID:** `gts.x.core.sless.workflow_traits.v1~`
 
 ```json
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "gts://gts.x.core.serverless.workflow_traits.v1~",
+  "$id": "gts://gts.x.core.sless.workflow_traits.v1~",
   "title": "Workflow Traits",
   "description": "Workflow-specific execution traits: compensation, checkpointing, suspension.",
   "type": "object",
   "properties": {
     "compensation": {
       "type": "object",
-      "description": "Compensation handlers for saga pattern. Each handler is a function reference or null. Referenced functions receive a CompensationContext (gts.x.core.serverless.compensation_context.v1~) as their input.",
+      "description": "Compensation handlers for saga pattern. Each handler is a function reference or null. Referenced functions receive a CompensationContext (gts.x.core.sless.compensation_context.v1~) as their input.",
       "properties": {
         "on_failure": {
           "oneOf": [
             {
               "type": "string",
-              "x-gts-ref": "gts.x.core.serverless.function.*",
+              "x-gts-ref": "gts.x.core.sless.function.v1~*",
               "description": "GTS ID of function to invoke on workflow failure. Receives CompensationContext as input."
             },
             {
@@ -431,7 +492,7 @@ Each schema is preserved exactly as defined in the original design, grouped by e
           "oneOf": [
             {
               "type": "string",
-              "x-gts-ref": "gts.x.core.serverless.function.*",
+              "x-gts-ref": "gts.x.core.sless.function.v1~*",
               "description": "GTS ID of function to invoke on workflow cancellation. Receives CompensationContext as input."
             },
             {
@@ -472,12 +533,12 @@ Each schema is preserved exactly as defined in the original design, grouped by e
 
 ### CompensationContext
 
-**GTS ID:** `gts.x.core.serverless.compensation_context.v1~`
+**GTS ID:** `gts.x.core.sless.compensation_context.v1~`
 
 ```json
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "gts://gts.x.core.serverless.compensation_context.v1~",
+  "$id": "gts://gts.x.core.sless.compensation_context.v1~",
   "title": "Compensation Context",
   "description": "Input envelope passed to compensation functions. Delivered as the single JSON body (params) when the runtime invokes an on_failure or on_cancel handler.",
   "type": "object",
@@ -504,7 +565,7 @@ Each schema is preserved exactly as defined in the original design, grouped by e
     },
     "failed_step_id": {
       "type": "string",
-      "description": "Identifier of the step that failed or was active at cancellation. Adapter-specific granularity. Set to 'unknown' when the adapter does not track step-level state."
+      "description": "Identifier of the step that failed or was active at cancellation. Runtime-specific granularity. Set to 'unknown' when the runtime does not track step-level state."
     },
     "failed_step_error": {
       "type": "object",
@@ -520,8 +581,15 @@ Each schema is preserved exactly as defined in the original design, grouped by e
         },
         "error_metadata": {
           "type": "object",
-          "additionalProperties": true,
-          "description": "Error-type-specific metadata. Structure is defined per error type."
+          "additionalProperties": false,
+          "description": "Error-type-specific metadata. Structure is defined per error type.",
+          "properties": {
+            "metadata": {
+              "type": "object",
+              "description": "Extension point for error-type-specific fields.",
+              "additionalProperties": true
+            }
+          }
         }
       },
       "required": [
@@ -531,8 +599,15 @@ Each schema is preserved exactly as defined in the original design, grouped by e
     },
     "workflow_state_snapshot": {
       "type": "object",
-      "description": "Last checkpointed workflow state. Adapter-specific and opaque to the platform. Contains accumulated step results, intermediate data, or adapter-native state. Empty object if failure occurred before the first checkpoint.",
-      "additionalProperties": true
+      "description": "Last checkpointed workflow state. Runtime-specific and opaque to the platform. Contains accumulated step results, intermediate data, or runtime-native state. Empty object if failure occurred before the first checkpoint.",
+      "additionalProperties": false,
+      "properties": {
+        "metadata": {
+          "type": "object",
+          "description": "Extension point for runtime-specific workflow state fields.",
+          "additionalProperties": true
+        }
+      }
     },
     "timestamp": {
       "type": "string",
@@ -550,8 +625,8 @@ Each schema is preserved exactly as defined in the original design, grouped by e
       "properties": {
         "function_id": {
           "type": "string",
-          "x-gts-ref": "gts.x.core.serverless.function.*",
-          "description": "GTS ID of the workflow function that failed."
+          "x-gts-ref": "gts.x.core.sless.workflow.v1~*",
+          "description": "GTS ID of the workflow that failed."
         },
         "original_input": {
           "type": "object",
@@ -580,12 +655,12 @@ Each schema is preserved exactly as defined in the original design, grouped by e
 
 ### InvocationStatus
 
-**GTS ID:** `gts.x.core.serverless.status.v1~`
+**GTS ID:** `gts.x.core.sless.status.v1~`
 
 ```json
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "gts://gts.x.core.serverless.status.v1~",
+  "$id": "gts://gts.x.core.sless.status.v1~",
   "title": "Invocation Status",
   "description": "Base type for invocation status. Concrete statuses are derived types.",
   "type": "string",
@@ -605,12 +680,12 @@ Each schema is preserved exactly as defined in the original design, grouped by e
 
 ### Error
 
-**GTS ID:** `gts.x.core.serverless.err.v1~`
+**GTS ID:** `gts.x.core.sless.err.v1~`
 
 ```json
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "gts://gts.x.core.serverless.err.v1~",
+  "$id": "gts://gts.x.core.sless.err.v1~",
   "title": "Serverless Error",
   "description": "Base error type. Concrete errors are derived types.",
   "type": "object",
@@ -644,17 +719,17 @@ Each schema is preserved exactly as defined in the original design, grouped by e
 
 ### ValidationError
 
-**GTS ID:** `gts.x.core.serverless.err.v1~x.core.serverless.err.validation.v1~`
+**GTS ID:** `gts.x.core.sless.err.v1~x.core.sless.err.validation.v1~`
 
 ```json
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "gts://gts.x.core.serverless.err.v1~x.core.serverless.err.validation.v1~",
+  "$id": "gts://gts.x.core.sless.err.v1~x.core.sless.err.validation.v1~",
   "title": "Validation Error",
   "description": "Validation error with multiple issues, each with error type and location.",
   "allOf": [
     {
-      "$ref": "gts://gts.x.core.serverless.err.v1~"
+      "$ref": "gts://gts.x.core.sless.err.v1~"
     },
     {
       "type": "object",
@@ -728,12 +803,12 @@ Each schema is preserved exactly as defined in the original design, grouped by e
 
 ### InvocationTimelineEvent
 
-**GTS ID:** `gts.x.core.serverless.timeline_event.v1~`
+**GTS ID:** `gts.x.core.sless.timeline_event.v1~`
 
 ```json
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "gts://gts.x.core.serverless.timeline_event.v1~",
+  "$id": "gts://gts.x.core.sless.timeline_event.v1~",
   "title": "Invocation Timeline Event",
   "description": "A single event in the execution timeline.",
   "type": "object",
@@ -766,7 +841,7 @@ Each schema is preserved exactly as defined in the original design, grouped by e
       "description": "Type of timeline event."
     },
     "status": {
-      "$ref": "gts://gts.x.core.serverless.status.v1~",
+      "$ref": "gts://gts.x.core.sless.status.v1~",
       "description": "Invocation status after this event (short enum value, e.g. 'running')."
     },
     "step_name": {
@@ -807,16 +882,60 @@ Each schema is preserved exactly as defined in the original design, grouped by e
 
 ## Entity Definitions
 
-### Function (Base Type)
+### Lifecycle Status Types
 
-**GTS ID:** `gts.x.core.serverless.function.v1~`
+**GTS ID (base):** `gts.x.core.sless.func_lifecycle_status.v1~`
+
+The lifecycle status field references concrete GTS instances rather than a raw string enum. Each status value is a GTS instance of the base type `gts.x.core.sless.func_lifecycle_status.v1~`.
 
 ```json
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "gts://gts.x.core.serverless.function.v1~",
+  "$id": "gts://gts.x.core.sless.func_lifecycle_status.v1~",
+  "title": "Function Lifecycle Status (Base)",
+  "description": "Base type for function/workflow lifecycle statuses. Concrete statuses are GTS instances of this type.",
+  "type": "object",
+  "properties": {
+    "id": {
+      "type": "string",
+      "description": "GTS instance address for this status value."
+    },
+    "description": {
+      "type": "string",
+      "description": "Human-readable description of what this lifecycle status means."
+    },
+    "replaced_by": {
+      "type": ["string", "null"],
+      "x-gts-ref": "gts.x.core.sless.func_lifecycle_status.v1~*",
+      "description": "Optional GTS instance ID of the status that supersedes this one (used for deprecated/archived statuses).",
+      "default": null
+    }
+  },
+  "required": ["id", "description"]
+}
+```
+
+**Concrete status instances:**
+
+| Instance ID | Description | replaced_by |
+|---|---|---|
+| `gts.x.core.sless.func_lifecycle_status.v1~x.core.sless.func_lifecycle_status.draft.v1~` | Function is being authored and has not been published. Not externally invocable. | — |
+| `gts.x.core.sless.func_lifecycle_status.v1~x.core.sless.func_lifecycle_status.active.v1~` | Function is published and accepting invocations. | — |
+| `gts.x.core.sless.func_lifecycle_status.v1~x.core.sless.func_lifecycle_status.deprecated.v1~` | Function is still invocable but discouraged. Callers should migrate to a replacement. | active |
+| `gts.x.core.sless.func_lifecycle_status.v1~x.core.sless.func_lifecycle_status.disabled.v1~` | Function is temporarily suspended. No new invocations are accepted; existing in-flight invocations complete normally. | — |
+| `gts.x.core.sless.func_lifecycle_status.v1~x.core.sless.func_lifecycle_status.archived.v1~` | Function is read-only. No invocations accepted. Definition is retained for audit and lineage purposes. | — |
+| `gts.x.core.sless.func_lifecycle_status.v1~x.core.sless.func_lifecycle_status.deleted.v1~` | Function has been logically deleted. Retained only for audit trail; no operations permitted. | archived |
+
+### Function (Base Type)
+
+**GTS ID:** `gts.x.core.sless.function.v1~`
+
+```json
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "gts://gts.x.core.sless.function.v1~",
   "title": "Serverless Function",
-  "description": "Base schema for serverless functions (functions and workflows). Identity is the GTS instance address.",
+  "description": "Base schema for serverless functions. Identity is the GTS instance address.",
   "type": "object",
   "properties": {
     "version": {
@@ -827,19 +946,13 @@ Each schema is preserved exactly as defined in the original design, grouped by e
       "type": "string"
     },
     "owner": {
-      "$ref": "gts://gts.x.core.serverless.owner_ref.v1~"
+      "$ref": "gts://gts.x.core.sless.owner_ref.v1~"
     },
     "status": {
       "type": "string",
-      "enum": [
-        "draft",
-        "active",
-        "deprecated",
-        "disabled",
-        "archived",
-        "deleted"
-      ],
-      "default": "draft"
+      "x-gts-ref": "gts.x.core.sless.func_lifecycle_status.v1~*",
+      "description": "Lifecycle status. References a concrete GTS instance of gts.x.core.sless.func_lifecycle_status.v1~.",
+      "default": "gts.x.core.sless.func_lifecycle_status.v1~x.core.sless.func_lifecycle_status.draft.v1~"
     },
     "tags": {
       "type": "array",
@@ -855,7 +968,7 @@ Each schema is preserved exactly as defined in the original design, grouped by e
       "type": "string"
     },
     "schema": {
-      "$ref": "gts://gts.x.core.serverless.io_schema.v1~"
+      "$ref": "gts://gts.x.core.sless.io_schema.v1~"
     },
     "traits": {
       "type": "object",
@@ -914,12 +1027,19 @@ Each schema is preserved exactly as defined in the original design, grouped by e
               "properties": {
                 "strategy": {
                   "type": "string",
-                  "description": "GTS type ID of the rate limiter plugin (derived from gts.x.core.serverless.rate_limit.v1~)."
+                  "description": "GTS type ID of the rate limiter plugin (derived from gts.x.core.sless.rate_limit.v1~)."
                 },
                 "config": {
                   "type": "object",
                   "description": "Strategy-specific configuration. Validated by the resolved plugin against its derived schema.",
-                  "additionalProperties": true
+                  "additionalProperties": false,
+                  "properties": {
+                    "metadata": {
+                      "type": "object",
+                      "description": "Extension point for strategy-specific rate limit config fields.",
+                      "additionalProperties": true
+                    }
+                  }
                 }
               },
               "additionalProperties": false
@@ -929,10 +1049,10 @@ Each schema is preserved exactly as defined in the original design, grouped by e
           "default": null
         },
         "limits": {
-          "$ref": "gts://gts.x.core.serverless.limits.v1~"
+          "$ref": "gts://gts.x.core.sless.limits.v1~"
         },
         "retry": {
-          "$ref": "gts://gts.x.core.serverless.retry_policy.v1~"
+          "$ref": "gts://gts.x.core.sless.retry_policy.v1~"
         }
       },
       "required": [
@@ -942,7 +1062,7 @@ Each schema is preserved exactly as defined in the original design, grouped by e
       ]
     },
     "implementation": {
-      "$ref": "gts://gts.x.core.serverless.implementation.v1~"
+      "$ref": "gts://gts.x.core.sless.implementation.v1~"
     },
     "created_at": {
       "type": "string",
@@ -963,67 +1083,201 @@ Each schema is preserved exactly as defined in the original design, grouped by e
     "traits",
     "implementation"
   ],
-  "additionalProperties": true
+  "additionalProperties": false
 }
 ```
 
-### Workflow
+### Workflow (Sibling Base Type)
 
-**GTS ID:** `gts.x.core.serverless.function.v1~x.core.serverless.workflow.v1~`
+**GTS ID:** `gts.x.core.sless.workflow.v1~`
+
+Workflow is a sibling peer of Function — an independent base type, not derived from Function. Both share the same base fields (params, returns, limits, retry_policy, rate_limit, implementation, lifecycle_status). Workflow adds `workflow_traits` for durable execution capabilities.
 
 ```json
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "gts://gts.x.core.serverless.function.v1~x.core.serverless.workflow.v1~",
+  "$id": "gts://gts.x.core.sless.workflow.v1~",
   "title": "Serverless Workflow",
-  "description": "Durable, multi-step orchestration with state persistence.",
-  "allOf": [
-    {
-      "$ref": "gts://gts.x.core.serverless.function.v1~"
+  "description": "Standalone base schema for durable, multi-step orchestrations with state persistence. Sibling peer of gts.x.core.sless.function.v1~ — not derived from it.",
+  "type": "object",
+  "properties": {
+    "version": {
+      "type": "string",
+      "pattern": "^\\d+\\.\\d+\\.\\d+$"
     },
-    {
+    "tenant_id": {
+      "type": "string"
+    },
+    "owner": {
+      "$ref": "gts://gts.x.core.sless.owner_ref.v1~"
+    },
+    "status": {
+      "type": "string",
+      "x-gts-ref": "gts.x.core.sless.func_lifecycle_status.v1~*",
+      "description": "Lifecycle status. References a concrete GTS instance of gts.x.core.sless.func_lifecycle_status.v1~.",
+      "default": "gts.x.core.sless.func_lifecycle_status.v1~x.core.sless.func_lifecycle_status.draft.v1~"
+    },
+    "tags": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "default": []
+    },
+    "title": {
+      "type": "string"
+    },
+    "description": {
+      "type": "string"
+    },
+    "schema": {
+      "$ref": "gts://gts.x.core.sless.io_schema.v1~"
+    },
+    "traits": {
       "type": "object",
       "properties": {
-        "traits": {
+        "invocation": {
           "type": "object",
           "properties": {
-            "workflow": {
-              "$ref": "gts://gts.x.core.serverless.workflow_traits.v1~"
+            "supported": {
+              "type": "array",
+              "items": {
+                "enum": [
+                  "sync",
+                  "async"
+                ]
+              }
+            },
+            "default": {
+              "enum": [
+                "sync",
+                "async"
+              ]
             }
           },
           "required": [
-            "workflow"
+            "supported",
+            "default"
           ]
+        },
+        "entrypoint": {
+          "type": "boolean",
+          "default": true,
+          "description": "When true (default), the workflow can be invoked via external APIs (JSON-RPC, Jobs API). When false, the workflow can only be invoked internally via r_invoke_v1()."
+        },
+        "is_idempotent": {
+          "type": "boolean",
+          "default": false
+        },
+        "caching": {
+          "type": "object",
+          "description": "Response caching policy. Caching is only active when the caller provides an `Idempotency-Key` header AND `max_age_seconds > 0`",
+          "properties": {
+            "max_age_seconds": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0,
+              "description": "Time-to-live in seconds for cached successful results. `0` disables response caching even when an idempotency key is present."
+            }
+          }
+        },
+        "rate_limit": {
+          "description": "Optional rate limiting. Null or absent means no rate limiting.",
+          "oneOf": [
+            {
+              "type": "object",
+              "required": ["strategy", "config"],
+              "properties": {
+                "strategy": {
+                  "type": "string",
+                  "description": "GTS type ID of the rate limiter plugin (derived from gts.x.core.sless.rate_limit.v1~)."
+                },
+                "config": {
+                  "type": "object",
+                  "description": "Strategy-specific configuration. Validated by the resolved plugin against its derived schema.",
+                  "additionalProperties": false,
+                  "properties": {
+                    "metadata": {
+                      "type": "object",
+                      "description": "Extension point for strategy-specific rate limit config fields.",
+                      "additionalProperties": true
+                    }
+                  }
+                }
+              },
+              "additionalProperties": false
+            },
+            { "type": "null" }
+          ],
+          "default": null
+        },
+        "limits": {
+          "$ref": "gts://gts.x.core.sless.limits.v1~"
+        },
+        "retry": {
+          "$ref": "gts://gts.x.core.sless.retry_policy.v1~"
+        },
+        "workflow": {
+          "$ref": "gts://gts.x.core.sless.workflow_traits.v1~"
         }
       },
       "required": [
-        "traits"
+        "invocation",
+        "limits",
+        "retry",
+        "workflow"
       ]
+    },
+    "implementation": {
+      "$ref": "gts://gts.x.core.sless.implementation.v1~"
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "updated_at": {
+      "type": "string",
+      "format": "date-time"
     }
-  ]
+  },
+  "required": [
+    "version",
+    "tenant_id",
+    "owner",
+    "status",
+    "title",
+    "schema",
+    "traits",
+    "implementation"
+  ],
+  "additionalProperties": false
 }
 ```
 
 ### InvocationRecord
 
-**GTS ID:** `gts.x.core.serverless.invocation.v1~`
+**GTS ID:** `gts.x.core.sless.invocation.v1~`
 
 ```json
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "gts://gts.x.core.serverless.invocation.v1~",
+  "$id": "gts://gts.x.core.sless.invocation.v1~",
   "title": "Invocation Record",
-  "description": "Tracks lifecycle of a single function execution.",
+  "description": "Tracks lifecycle of a single function or workflow execution.",
   "type": "object",
   "properties": {
     "invocation_id": {
       "type": "string",
       "description": "Opaque unique identifier for this invocation."
     },
+    "callable_type": {
+      "type": "string",
+      "enum": ["function", "workflow"],
+      "description": "Type of the invoked callable. Determines which GTS type family function_id belongs to."
+    },
     "function_id": {
       "type": "string",
-      "x-gts-ref": "gts.x.core.serverless.function.*",
-      "description": "GTS ID of the invoked function."
+      "description": "GTS ID of the invoked function or workflow. Must match gts.x.core.sless.function.v1~* when callable_type is 'function', or gts.x.core.sless.workflow.v1~* when callable_type is 'workflow'."
     },
     "function_version": {
       "type": "string",
@@ -1032,8 +1286,21 @@ Each schema is preserved exactly as defined in the original design, grouped by e
     "tenant_id": {
       "type": "string"
     },
+    "subject_id": {
+      "type": "string",
+      "description": "Identity of the actor that initiated this invocation — user ID or service account ID. Required for audit purposes (BR-024, BR-034)."
+    },
+    "subject_type": {
+      "type": "string",
+      "enum": [
+        "user",
+        "service",
+        "system"
+      ],
+      "description": "Category of the invoking actor. Required for audit purposes (BR-024, BR-034). 'user' = human user, 'service' = service account or API client, 'system' = platform-initiated (scheduler, trigger, etc.)."
+    },
     "status": {
-      "$ref": "gts://gts.x.core.serverless.status.v1~",
+      "$ref": "gts://gts.x.core.sless.status.v1~",
       "description": "Invocation status (short enum value, e.g. 'running')."
     },
     "mode": {
@@ -1194,6 +1461,8 @@ Each schema is preserved exactly as defined in the original design, grouped by e
     "function_id",
     "function_version",
     "tenant_id",
+    "subject_id",
+    "subject_type",
     "status",
     "mode",
     "timestamps",
@@ -1206,14 +1475,14 @@ Each schema is preserved exactly as defined in the original design, grouped by e
 
 ### Schedule
 
-**GTS ID:** `gts.x.core.serverless.schedule.v1~`
+**GTS ID:** `gts.x.core.sless.schedule.v1~`
 
 ```json
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "gts://gts.x.core.serverless.schedule.v1~",
+  "$id": "gts://gts.x.core.sless.schedule.v1~",
   "title": "Schedule",
-  "description": "Recurring trigger for a function.",
+  "description": "Recurring trigger for a function or workflow.",
   "type": "object",
   "properties": {
     "schedule_id": {
@@ -1223,10 +1492,15 @@ Each schema is preserved exactly as defined in the original design, grouped by e
     "tenant_id": {
       "type": "string"
     },
+    "callable_type": {
+      "type": "string",
+      "enum": ["function", "workflow"],
+      "default": "function",
+      "description": "Type of the referenced callable. Determines which GTS type family function_id belongs to: 'function' requires gts.x.core.sless.function.v1~*, 'workflow' requires gts.x.core.sless.workflow.v1~*. If absent, inferred from the GTS type prefix of function_id."
+    },
     "function_id": {
       "type": "string",
-      "x-gts-ref": "gts.x.core.serverless.function.*",
-      "description": "GTS ID of the function to invoke."
+      "description": "GTS ID of the function or workflow to invoke. Must match gts.x.core.sless.function.v1~* when callable_type is 'function', or gts.x.core.sless.workflow.v1~* when callable_type is 'workflow'."
     },
     "name": {
       "type": "string",
@@ -1346,14 +1620,14 @@ Each schema is preserved exactly as defined in the original design, grouped by e
 
 ### Trigger
 
-**GTS ID:** `gts.x.core.serverless.trigger.v1~`
+**GTS ID:** `gts.x.core.sless.trigger.v1~`
 
 ```json
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "gts://gts.x.core.serverless.trigger.v1~",
+  "$id": "gts://gts.x.core.sless.trigger.v1~",
   "title": "Trigger",
-  "description": "Binds an event type to a function for event-driven invocation.",
+  "description": "Binds an event type to a function or workflow for event-driven invocation.",
   "type": "object",
   "properties": {
     "trigger_id": {
@@ -1382,7 +1656,7 @@ Each schema is preserved exactly as defined in the original design, grouped by e
           "description": "Whether failed events should be moved to DLQ after retry exhaustion."
         },
         "retry_policy": {
-          "$ref": "gts://gts.x.core.serverless.retry_policy.v1~",
+          "$ref": "gts://gts.x.core.sless.retry_policy.v1~",
           "description": "Retry policy before moving to DLQ. Uses exponential backoff with configurable attempts."
         },
         "dlq_topic": {
@@ -1401,10 +1675,15 @@ Each schema is preserved exactly as defined in the original design, grouped by e
         }
       }
     },
+    "callable_type": {
+      "type": "string",
+      "enum": ["function", "workflow"],
+      "default": "function",
+      "description": "Type of the referenced callable. Determines which GTS type family function_id belongs to: 'function' requires gts.x.core.sless.function.v1~*, 'workflow' requires gts.x.core.sless.workflow.v1~*. If absent, inferred from the GTS type prefix of function_id."
+    },
     "function_id": {
       "type": "string",
-      "x-gts-ref": "gts.x.core.serverless.function.*",
-      "description": "GTS ID of the function to invoke."
+      "description": "GTS ID of the function or workflow to invoke. Must match gts.x.core.sless.function.v1~* when callable_type is 'function', or gts.x.core.sless.workflow.v1~* when callable_type is 'workflow'."
     },
     "batch": {
       "type": "object",
@@ -1446,12 +1725,12 @@ Each schema is preserved exactly as defined in the original design, grouped by e
 
 ### Webhook Trigger
 
-**GTS ID:** `gts.x.core.serverless.webhook_trigger.v1~`
+**GTS ID:** `gts.x.core.sless.webhook_trigger.v1~`
 
 ```json
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "gts://gts.x.core.serverless.webhook_trigger.v1~",
+  "$id": "gts://gts.x.core.sless.webhook_trigger.v1~",
   "title": "Webhook Trigger",
   "description": "Exposes an HTTP endpoint for external systems to trigger function executions.",
   "type": "object",
@@ -1463,10 +1742,15 @@ Each schema is preserved exactly as defined in the original design, grouped by e
     "tenant_id": {
       "type": "string"
     },
+    "callable_type": {
+      "type": "string",
+      "enum": ["function", "workflow"],
+      "default": "function",
+      "description": "Type of the referenced callable. Determines which GTS type family function_id belongs to: 'function' requires gts.x.core.sless.function.v1~*, 'workflow' requires gts.x.core.sless.workflow.v1~*. If absent, inferred from the GTS type prefix of function_id."
+    },
     "function_id": {
       "type": "string",
-      "x-gts-ref": "gts.x.core.serverless.function.*",
-      "description": "GTS ID of the function to invoke."
+      "description": "GTS ID of the function or workflow to invoke. Must match gts.x.core.sless.function.v1~* when callable_type is 'function', or gts.x.core.sless.workflow.v1~* when callable_type is 'workflow'."
     },
     "authentication": {
       "type": "object",
@@ -1514,12 +1798,12 @@ Each schema is preserved exactly as defined in the original design, grouped by e
 
 ### TenantRuntimePolicy
 
-**GTS ID:** `gts.x.core.serverless.tenant_policy.v1~`
+**GTS ID:** `gts.x.core.sless.tenant_policy.v1~`
 
 ```json
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "gts://gts.x.core.serverless.tenant_policy.v1~",
+  "$id": "gts://gts.x.core.sless.tenant_policy.v1~",
   "title": "Tenant Runtime Policy",
   "description": "Tenant-level governance settings for the serverless runtime.",
   "type": "object",
@@ -1595,9 +1879,9 @@ Each schema is preserved exactly as defined in the original design, grouped by e
           "type": "array",
           "items": {
             "type": "string",
-            "x-gts-ref": "gts.x.core.serverless.adapter.*"
+            "x-gts-ref": "gts.x.core.sless.runtime.*"
           },
-          "description": "List of allowed adapter GTS type IDs (e.g., gts.x.core.serverless.adapter.starlark.v1~). Validated against implementation.adapter at registration time."
+          "description": "List of allowed runtime GTS type IDs (e.g., gts.x.core.sless.runtime.starlark.v1~). Validated against implementation.adapter at registration time."
         },
         "require_approval_for_publish": {
           "type": "boolean",

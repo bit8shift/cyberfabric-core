@@ -1,5 +1,36 @@
 # Technical Design — Serverless Runtime
 
+
+<!-- toc -->
+
+- [1. Architecture Overview](#1-architecture-overview)
+  - [1.1 Architectural Vision](#11-architectural-vision)
+  - [1.2 Architecture Drivers](#12-architecture-drivers)
+  - [1.3 Architecture Layers](#13-architecture-layers)
+  - [1.4 ModKit Integration](#14-modkit-integration)
+- [2. Principles & Constraints](#2-principles--constraints)
+  - [2.1 Design Principles](#21-design-principles)
+  - [2.2 Constraints](#22-constraints)
+  - [2.3 Industry Comparison and Capability Allocation](#23-industry-comparison-and-capability-allocation)
+- [3. Technical Architecture](#3-technical-architecture)
+  - [3.1 Domain Model](#31-domain-model)
+  - [3.1.1 Complete Entity Examples](#311-complete-entity-examples)
+  - [3.2 Component Model](#32-component-model)
+  - [3.3 API Contracts](#33-api-contracts)
+  - [3.4 Internal Dependencies](#34-internal-dependencies)
+  - [3.5 External Dependencies](#35-external-dependencies)
+  - [3.6 Interactions & Sequences](#36-interactions--sequences)
+  - [3.7 Database schemas & tables](#37-database-schemas--tables)
+- [4. Additional Context](#4-additional-context)
+  - [Security Considerations](#security-considerations)
+  - [Audit Events](#audit-events)
+  - [Comparison with Similar Solutions](#comparison-with-similar-solutions)
+  - [Implementation Considerations](#implementation-considerations)
+  - [Non-Applicable Domains](#non-applicable-domains)
+- [5. Traceability](#5-traceability)
+
+<!-- /toc -->
+
 <!--
 =============================================================================
 TECHNICAL DESIGN DOCUMENT
@@ -48,7 +79,9 @@ DESIGN LANGUAGE:
 
 The Serverless Runtime module provides a stable, implementation-agnostic domain model and API contract for runtime creation, registration, and invocation of functions and workflows. Functions and workflows are unified as **functions** — registered definitions that can be invoked via the runtime API. This unification enables a single invocation surface, consistent response shapes, and shared lifecycle management regardless of the underlying execution technology.
 
-The architecture is designed to support multiple implementation technologies (Temporal, Starlark, cloud-native FaaS) through a pluggable adapter model. Each adapter registers itself as a GTS type and implements the abstract `ServerlessRuntime` trait. The platform validates adapter-specific limits, traits, and implementation payloads against the adapter's registered schemas, ensuring type safety without coupling the core model to any specific runtime.
+The architecture is designed to support multiple implementation technologies (Temporal, Starlark, cloud-native FaaS) through a pluggable adapter model. Each adapter registers itself as a GTS type and implements the `RuntimeAdapter` trait. The platform validates adapter-specific limits, traits, and implementation payloads against the adapter's registered schemas, ensuring type safety without coupling the core model to any specific runtime.
+
+**Scope note — orchestrator core vs. adapter-provided workflow features:** The orchestrator core provides the durable state machine (job lifecycle, retry, compensation, checkpoint persistence, timeout enforcement, scheduling, and tenant isolation). Workflow orchestration features — parallel execution, event waiting, per-step timeouts, deterministic replay, and conditional branching — are delegated to runtime adapters via the `ExecutionContext` host callback API. The platform ships with a Starlark adapter for sequential function chains; full workflow orchestration capabilities are unlocked by plugging in a capable adapter (Temporal, Serverless Workflow 1.0, etc.). This is intentional: the core remains independent of execution engine specifics, and adapters can leverage their native strengths without being constrained by a lowest-common-denominator abstraction. See [section 2.3](#23-industry-comparison-and-capability-allocation) for the detailed capability allocation.
 
 The domain model uses the Global Type System (GTS) for identity, schema validation, and type inheritance. All entities carry GTS identifiers, enabling schema-first validation, version resolution, and consistent cross-module references. Security context propagation, tenant isolation, and governance are built into the API contract layer, ensuring that every operation is scoped, auditable, and policy-compliant.
 
@@ -100,7 +133,7 @@ Requirements that significantly influence architecture decisions.
 
 | ADR ID | Decision Summary |
 |--------|-----------------|
-| `cpt-cf-serverless-runtime-adr-callable-type-hierarchy` | Unified callable type hierarchy: Function as base type, Workflow as derived specialization |
+| `cpt-cf-serverless-runtime-adr-callable-type-hierarchy` | Unified callable type hierarchy: Function and Workflow as sibling GTS base types with identical base schema fields |
 
 ### 1.3 Architecture Layers
 
@@ -110,6 +143,602 @@ Requirements that significantly influence architecture decisions.
 | Domain | Core entities, state machines, validation rules, GTS type resolution | Rust, GTS type system |
 | Runtime | Pluggable execution adapters, invocation engine, scheduler, event processing | Rust async traits, adapter plugins |
 | Infrastructure | Persistence, caching, event broker integration, secret management | TBD per deployment |
+
+### 1.4 ModKit Integration
+
+The serverless-runtime capability is implemented as **two ModKit modules** — an **orchestrator** and a **runtime** — following the canonical DDD-light layout defined in [Module Layout and SDK Pattern](../../../docs/modkit_unified_system/02_module_layout_and_sdk_pattern.md). This split mirrors the existing platform architecture where dispatch (stateful, DB-backed, guarantees) and toolboxes (stateless execution) are separate microservices.
+
+**Rationale for the two-module split:**
+
+| Concern | `sless-orchestrator` | `sless-runtime` |
+|---|---|---|
+| **Responsibility** | Job lifecycle, scheduling, triggers, retries, compensation, checkpoint storage | Stateless function/workflow execution |
+| **State** | Stateful — DB-backed (jobs, invocations, checkpoints, schedules) | Stateless — receives work, executes, returns results |
+| **Scaling** | Few instances, distributed locking for job polling | Many instances, scale-to-zero per adapter |
+| **DB** | Yes — `SecureConn`, tenant isolation, advisory locks | No — no database dependency |
+| **Guarantees** | At-least-once delivery, status machine, compensation orchestration | Best-effort execution, timeout enforcement |
+| **ModKit capabilities** | `[db, rest, stateful]` | `[rest]` (or `[grpc]` for internal-only) |
+
+#### 1.4.1 Module Structure
+
+```
+modules/
+  sless-orchestrator/
+    ├─ sless-orchestrator-sdk/            # SDK crate (public API surface)
+    │  ├─ Cargo.toml
+    │  └─ src/
+    │     ├─ lib.rs
+    │     ├─ api.rs                       # SlessOrchestratorClient trait (ClientHub path)
+    │     ├─ models.rs                    # Transport-agnostic domain models
+    │     └─ errors.rs                    # SlessOrchestratorError enum
+    └─ sless-orchestrator/                # Module implementation crate
+       ├─ Cargo.toml
+       └─ src/
+          ├─ lib.rs
+          ├─ module.rs                    # SlessOrchestratorModule + Module/Db/Rest/Stateful impls
+          ├─ config.rs                    # Typed module configuration
+          ├─ api/
+          │  └─ rest/
+          │     ├─ dto.rs                 # HTTP DTOs (serde/utoipa)
+          │     ├─ handlers.rs            # Axum handlers — error→Problem mapping
+          │     └─ routes.rs              # Route & OpenAPI registration
+          ├─ domain/
+          │  ├─ error.rs                  # DomainError (no HTTP concepts)
+          │  ├─ service.rs                # FunctionRegistry, InvocationEngine orchestration
+          │  ├─ scheduler.rs              # SchedulerService — cron evaluation, job creation
+          │  ├─ trigger.rs                # TriggerService — event matching, job creation
+          │  └─ job_worker.rs             # Job polling loop with distributed advisory lock
+          └─ infra/
+             ├─ storage/
+             │  ├─ entity/                # SeaORM entities with #[derive(Scopable)]
+             │  │  ├─ function.rs
+             │  │  ├─ workflow.rs
+             │  │  ├─ invocation.rs
+             │  │  ├─ checkpoint.rs
+             │  │  ├─ schedule.rs
+             │  │  ├─ trigger.rs
+             │  │  ├─ webhook_trigger.rs
+             │  │  └─ tenant_policy.rs
+             │  ├─ repo/                  # Repository implementations using SecureConn
+             │  ├─ mapper.rs              # Entity <-> SDK model conversions
+             │  └─ migrations/
+             └─ plugins/                  # Trigger plugins (webhook, schedule, event)
+
+  sless-runtime/
+    ├─ sless-runtime-sdk/                 # SDK crate
+    │  ├─ Cargo.toml
+    │  └─ src/
+    │     ├─ lib.rs
+    │     ├─ api.rs                       # SlessRuntimeClient trait
+    │     ├─ models.rs                    # ExecuteRequest, ExecuteResult, HealthStatus
+    │     └─ errors.rs                    # SlessRuntimeError enum
+    └─ sless-runtime/                     # Module implementation crate
+       ├─ Cargo.toml
+       └─ src/
+          ├─ lib.rs
+          ├─ module.rs                    # SlessRuntimeModule + Module/Rest impls
+          ├─ domain/
+          │  ├─ executor.rs              # Executor trait — adapter-agnostic execution contract
+          │  └─ context.rs               # Runtime context (host callbacks for checkpoint, status)
+          └─ infra/
+             └─ plugins/                  # Runtime adapter plugins
+```
+
+**Component-to-ModKit mapping:**
+
+| Design Component | Module | ModKit Location | Notes |
+|---|---|---|---|
+| Function Registry | `sless-orchestrator` | `domain/service.rs` | CRUD + status machine + GTS validation |
+| Invocation Engine | `sless-orchestrator` | `domain/service.rs` | Orchestrates invocation lifecycle; creates jobs, tracks status |
+| Job Worker | `sless-orchestrator` | `domain/job_worker.rs` | Polls queued jobs with distributed advisory lock (single-leader) |
+| Scheduler | `sless-orchestrator` | `domain/scheduler.rs` | Background task — evaluates cron schedules, creates invocation jobs |
+| Event Trigger Engine | `sless-orchestrator` | `domain/trigger.rs` | Background task — matches events to triggers, creates invocation jobs |
+| Tenant Policy Manager | `sless-orchestrator` | `domain/service.rs` | Thin service layer for policy CRUD |
+| Persistence layer | `sless-orchestrator` | `infra/storage/` | SeaORM entities + `SecureConn` repositories |
+| Executor (Adapter) | `sless-runtime` | Plugin crates | Each adapter is a ModKit plugin (see 1.4.2) |
+| Executor Pool | `sless-runtime` | `domain/executor.rs` | Manages concurrent execution slots, timeout enforcement |
+| Host Callbacks | `sless-runtime` | `domain/context.rs` | Checkpoint/status reporting back to orchestrator |
+
+**Cross-module communication:** The orchestrator dispatches work to runtime instances through an abstracted `JobTransport` trait (see [1.4.5](#145-job-transport-abstraction)). The runtime calls back to the orchestrator via `SlessOrchestratorClient` for checkpoint persistence and status updates.
+
+#### 1.4.2 Runtime Adapters as ModKit Plugins
+
+Each executor adapter (Starlark, Temporal, Lambda, etc.) is a **ModKit plugin crate** within the `sless-runtime` module, not a compile-time dependency. This follows the same pattern used by `authn-resolver` and `mini-chat` for their plugins (e.g., `choose_plugin_instance` in `modkit::plugins`).
+
+**Constraints:**
+- The `sless-runtime` module crate **must not** depend on any adapter plugin crate. Plugin isolation is enforced at the crate dependency level.
+- Each adapter registers a GTS type (e.g., `gts.x.core.sless.runtime.starlark.v1~`) and a plugin spec trait (e.g., `SlessAdapterPluginSpecV1`).
+- At execution time, the runtime module resolves the adapter using `choose_plugin_instance`:
+
+```rust
+use modkit::plugins::{GtsPluginSelector, choose_plugin_instance};
+
+let adapter_gts_id = choose_plugin_instance::<SlessAdapterPluginSpecV1>(
+    &vendor_selector,
+    instances.iter().map(|e| (e.gts_id.as_str(), &e.content)),
+)?;
+let adapter = hub.get_scoped::<dyn SlessAdapterClientV1>(
+    &ClientScope::ByGtsId(adapter_gts_id),
+)?;
+```
+
+- Plugin selection is based on the `implementation.adapter` GTS type ID from the function definition, passed by the orchestrator in the `ExecuteRequest`.
+
+**Plugin spec type** (defined in `sless-runtime-sdk`):
+
+```rust
+use modkit_macros::struct_to_gts_schema;
+
+/// GTS schema type for runtime adapter plugin instances.
+/// Each adapter registers an instance of this type in the types-registry.
+#[struct_to_gts_schema(
+    base = "gts.x.core.modkit.plugin.v1~",
+    id = "gts.x.core.sless.adapter_plugin.v1~",
+    description = "Serverless runtime adapter plugin specification",
+    properties = ""
+)]
+pub struct SlessAdapterPluginSpecV1;
+```
+
+Each adapter plugin module registers itself during `init()`:
+
+```rust
+// In plugins/starlark-adapter/src/module.rs
+#[async_trait]
+impl Module for StarlarkAdapterPlugin {
+    async fn init(&self, ctx: &ModuleCtx) -> anyhow::Result<()> {
+        let instance_id = SlessAdapterPluginSpecV1::gts_make_instance_id(
+            "x.core.sless.runtime.starlark.v1"
+        );
+
+        // Register instance in types-registry
+        let registry = ctx.client_hub().get::<dyn TypesRegistryClient>()?;
+        let instance = BaseModkitPluginV1::<SlessAdapterPluginSpecV1> {
+            id: instance_id.clone(),
+            vendor: "core".into(),
+            priority: 0,
+            properties: SlessAdapterPluginSpecV1,
+        };
+        registry.register(vec![serde_json::to_value(&instance)?]).await?;
+
+        // Register scoped adapter client
+        let adapter: Arc<dyn RuntimeAdapter> = Arc::new(StarlarkAdapter::new());
+        ctx.client_hub().register_scoped::<dyn RuntimeAdapter>(
+            ClientScope::gts_id(&instance_id),
+            adapter,
+        );
+
+        Ok(())
+    }
+}
+```
+
+#### 1.4.3 SDK Crates
+
+Each module has its own SDK crate following the standard pattern.
+
+**`sless-orchestrator-sdk`** — the primary API surface for external consumers:
+
+```rust
+#[async_trait]
+pub trait SlessOrchestratorClient: Send + Sync {
+    /// Invoke a callable (function or workflow) by GTS ID.
+    async fn invoke(
+        &self,
+        ctx: &SecurityContext,
+        req: InvokeRequest,
+    ) -> Result<InvocationRecord, SlessOrchestratorError>;
+
+    async fn get_function(
+        &self,
+        ctx: &SecurityContext,
+        id: &str,
+    ) -> Result<FunctionDefinition, SlessOrchestratorError>;
+
+    async fn get_invocation(
+        &self,
+        ctx: &SecurityContext,
+        id: &str,
+    ) -> Result<InvocationRecord, SlessOrchestratorError>;
+
+    /// Called by sless-runtime to persist checkpoint data.
+    async fn publish_checkpoint(
+        &self,
+        ctx: &SecurityContext,
+        invocation_id: &str,
+        checkpoint: CheckpointData,
+    ) -> Result<(), SlessOrchestratorError>;
+
+    /// Called by sless-runtime to update invocation status.
+    async fn publish_status(
+        &self,
+        ctx: &SecurityContext,
+        invocation_id: &str,
+        status: InvocationStatus,
+    ) -> Result<(), SlessOrchestratorError>;
+
+    // ... additional CRUD operations for functions, schedules, triggers
+}
+```
+
+**`sless-runtime-sdk`** — consumed by the orchestrator to dispatch execution:
+
+```rust
+#[async_trait]
+pub trait SlessRuntimeClient: Send + Sync {
+    /// Execute a callable. The runtime is stateless — all state
+    /// persistence flows back through SlessOrchestratorClient.
+    async fn execute(
+        &self,
+        ctx: &SecurityContext,
+        req: ExecuteRequest,
+    ) -> Result<ExecuteResult, SlessRuntimeError>;
+
+    /// Health/readiness check for the runtime instance.
+    async fn health(&self) -> Result<HealthStatus, SlessRuntimeError>;
+}
+```
+
+Other modules obtain the orchestrator client via `ClientHub`:
+
+```rust
+let orchestrator = hub.get::<dyn SlessOrchestratorClient>()?;
+let result = orchestrator.invoke(&ctx, req).await?;
+```
+
+**Models**: Each SDK has transport-agnostic structs. Shared types (e.g., `FunctionDefinition`, `InvocationRecord`) live in `sless-orchestrator-sdk` since the orchestrator owns these entities. `sless-runtime-sdk` depends on `sless-orchestrator-sdk` for shared model types.
+
+#### 1.4.4 Error Mapping Layers
+
+ModKit requires three layers of error types with clear separation of concerns. Each module has its own error hierarchy.
+
+**`sless-orchestrator` errors:**
+
+Layer 1 — `DomainError` (`domain/error.rs`):
+Domain-internal errors with no HTTP or transport concepts. Annotated with `#[domain_model]`.
+
+```rust
+#[domain_model]
+pub enum DomainError {
+    FunctionNotFound { id: String },
+    FunctionNotActive { id: String, status: String },
+    ValidationFailed { issues: Vec<ValidationIssue> },
+    QuotaExceeded { tenant_id: String, limit: String },
+    RateLimited { function_id: String, retry_after_seconds: u64 },
+    RuntimeUnavailable { runtime_id: String },
+    InvocationFailed { invocation_id: String, reason: String },
+    Internal { message: String },
+}
+```
+
+Layer 2 — `SlessOrchestratorError` (SDK `errors.rs`):
+Transport-agnostic errors exposed to consumers via the SDK. These map 1:1 to the GTS error type hierarchy defined in section 3.1.
+
+```rust
+#[derive(Error, Debug, Clone)]
+pub enum SlessOrchestratorError {
+    #[error("Function not found: {id}")]
+    NotFound { id: String },
+
+    #[error("Function not active: {id} (status: {status})")]
+    NotActive { id: String, status: String },
+
+    #[error("Validation failed")]
+    Validation { issues: Vec<ValidationIssue> },
+
+    #[error("Quota exceeded for tenant {tenant_id}")]
+    QuotaExceeded { tenant_id: String },
+
+    #[error("Rate limited: retry after {retry_after_seconds}s")]
+    RateLimited { function_id: String, retry_after_seconds: u64 },
+
+    #[error("Execution timed out: {invocation_id}")]
+    RuntimeTimeout { invocation_id: String },
+
+    #[error("Sync invocation reached suspension point")]
+    SyncSuspension { invocation_id: String },
+
+    #[error("Internal error")]
+    Internal,
+}
+```
+
+Layer 3 — `Problem` (in `api/rest/error.rs`):
+HTTP-specific error responses using RFC 9457 Problem Details. Converted from `SlessOrchestratorError`:
+
+```rust
+impl From<SlessOrchestratorError> for Problem {
+    fn from(e: SlessOrchestratorError) -> Self {
+        match e {
+            SlessOrchestratorError::NotFound { id } => Problem::not_found()
+                .with_type_uri("gts://gts.x.core.sless.err.v1~x.core.sless.err.not_found.v1~")
+                .with_detail(format!("Function not found: {id}")),
+            SlessOrchestratorError::RateLimited { retry_after_seconds, .. } => Problem::too_many_requests()
+                .with_type_uri("gts://gts.x.core.sless.err.v1~x.core.sless.err.rate_limited.v1~")
+                .with_header("Retry-After", retry_after_seconds),
+            // ... remaining variants
+        }
+    }
+}
+```
+
+**`sless-runtime` errors:**
+
+The runtime module has a simpler error hierarchy since it has no DB or complex domain logic:
+
+```rust
+#[derive(Error, Debug, Clone)]
+pub enum SlessRuntimeError {
+    #[error("Execution failed: {reason}")]
+    ExecutionFailed { reason: String },
+
+    #[error("Execution timed out after {timeout_seconds}s")]
+    Timeout { timeout_seconds: u64 },
+
+    #[error("Adapter not found: {adapter_id}")]
+    AdapterNotFound { adapter_id: String },
+
+    #[error("Adapter unavailable: {adapter_id}")]
+    AdapterUnavailable { adapter_id: String },
+
+    #[error("Internal error")]
+    Internal,
+}
+```
+
+The domain service converts `DomainError` to the SDK error at the domain boundary. Handlers convert SDK errors to `Problem` at the API boundary. This follows the same pattern as `mini-chat` (see `modules/mini-chat/mini-chat/src/api/rest/error.rs`).
+
+#### 1.4.5 Job Transport Abstraction
+
+The orchestrator does not call `SlessRuntimeClient` directly. Instead, the domain layer codes against a **`JobTransport`** trait that abstracts how jobs are dispatched to runtime instances. This allows the transport mechanism to be swapped without changing orchestration logic.
+
+**Trait definition** (`domain/transport.rs`):
+
+```rust
+/// Outcome of dispatching a job to a runtime instance.
+pub enum DispatchOutcome {
+    /// The runtime executed the job synchronously and returned a result.
+    Completed(ExecuteResult),
+    /// The runtime accepted the job for async execution.
+    /// The orchestrator will receive status/checkpoint callbacks
+    /// via SlessOrchestratorClient.
+    Accepted {
+        runtime_instance_id: String,
+    },
+}
+
+/// Abstraction over how the orchestrator sends jobs to runtime instances.
+/// Implementations handle instance selection, load balancing, and transport.
+#[async_trait]
+pub trait JobTransport: Send + Sync {
+    /// Dispatch a job for synchronous execution.
+    /// Blocks until the runtime returns a result or times out.
+    async fn dispatch_sync(
+        &self,
+        ctx: &SecurityContext,
+        job: &Job,
+        req: ExecuteRequest,
+    ) -> Result<DispatchOutcome, TransportError>;
+
+    /// Dispatch a job for asynchronous execution.
+    /// Returns immediately once the runtime acknowledges receipt.
+    async fn dispatch_async(
+        &self,
+        ctx: &SecurityContext,
+        job: &Job,
+        req: ExecuteRequest,
+    ) -> Result<DispatchOutcome, TransportError>;
+
+    /// Cancel an in-flight job on the runtime.
+    async fn cancel(
+        &self,
+        ctx: &SecurityContext,
+        job: &Job,
+    ) -> Result<(), TransportError>;
+
+    /// List available runtime instances and their health status.
+    async fn available_instances(&self) -> Result<Vec<RuntimeInstance>, TransportError>;
+}
+
+#[derive(Error, Debug)]
+pub enum TransportError {
+    #[error("No runtime instances available")]
+    NoInstancesAvailable,
+
+    #[error("Runtime instance {instance_id} unreachable")]
+    InstanceUnreachable { instance_id: String },
+
+    #[error("Dispatch timed out after {timeout_seconds}s")]
+    Timeout { timeout_seconds: u64 },
+
+    #[error("Runtime rejected job: {reason}")]
+    Rejected { reason: String },
+
+    #[error("Transport error: {0}")]
+    Internal(#[from] anyhow::Error),
+}
+```
+
+**v1 implementation — `DirectClientTransport`** (`infra/transport/direct.rs`):
+
+The initial implementation dispatches jobs via direct REST/gRPC calls using `SlessRuntimeClient` through `ClientHub`, with instance selection via `DirectoryService`:
+
+```rust
+pub struct DirectClientTransport {
+    hub: Arc<ClientHub>,
+    directory: Arc<dyn DirectoryClient>,
+    strategy: SelectionStrategy,
+}
+
+pub enum SelectionStrategy {
+    RoundRobin,
+    LeastLoaded,
+}
+
+#[async_trait]
+impl JobTransport for DirectClientTransport {
+    async fn dispatch_sync(
+        &self,
+        ctx: &SecurityContext,
+        job: &Job,
+        req: ExecuteRequest,
+    ) -> Result<DispatchOutcome, TransportError> {
+        let instance = self.select_instance().await?;
+        let client = self.hub.get_scoped::<dyn SlessRuntimeClient>(
+            &ClientScope::ByEndpoint(&instance.endpoint_uri),
+        )?;
+
+        let result = client.execute(ctx, req).await
+            .map_err(|e| TransportError::InstanceUnreachable {
+                instance_id: instance.instance_id.clone(),
+            })?;
+
+        Ok(DispatchOutcome::Completed(result))
+    }
+
+    async fn dispatch_async(
+        &self,
+        ctx: &SecurityContext,
+        job: &Job,
+        req: ExecuteRequest,
+    ) -> Result<DispatchOutcome, TransportError> {
+        let instance = self.select_instance().await?;
+        let client = self.hub.get_scoped::<dyn SlessRuntimeClient>(
+            &ClientScope::ByEndpoint(&instance.endpoint_uri),
+        )?;
+
+        // Fire-and-forget — runtime will callback via SlessOrchestratorClient
+        tokio::spawn({
+            let ctx = ctx.clone();
+            async move { client.execute(&ctx, req).await }
+        });
+
+        Ok(DispatchOutcome::Accepted {
+            runtime_instance_id: instance.instance_id,
+        })
+    }
+
+    async fn cancel(&self, ctx: &SecurityContext, job: &Job) -> Result<(), TransportError> {
+        // Resolve the instance that is running this job (stored on the invocation record)
+        // and call SlessRuntimeClient::cancel()
+        todo!()
+    }
+
+    async fn available_instances(&self) -> Result<Vec<RuntimeInstance>, TransportError> {
+        let instances = self.directory
+            .list_instances("sless-runtime").await
+            .map_err(|e| TransportError::Internal(e.into()))?;
+        Ok(instances.into_iter().map(RuntimeInstance::from).collect())
+    }
+}
+```
+
+**Instance selection** uses `DirectoryService::ListInstances("sless-runtime")` to discover available runtime instances, then applies the configured `SelectionStrategy`. The orchestrator stores the selected `runtime_instance_id` on the invocation record so that cancellation and status correlation can target the correct instance.
+
+**Failure handling:** If `dispatch_sync` or `dispatch_async` returns `TransportError::InstanceUnreachable`, the job worker marks the job for retry and selects a different instance on the next attempt. The orchestrator's timeout reaper catches jobs where the runtime accepted work but never called back (runtime crash mid-execution).
+
+**Error mapping:** `TransportError` is converted to `DomainError` at the domain service boundary:
+
+| `TransportError` | `DomainError` | Retryable? |
+|---|---|---|
+| `NoInstancesAvailable` | `RuntimeUnavailable` | Yes — job stays `queued`, retried on next poll |
+| `InstanceUnreachable { instance_id }` | `RuntimeUnavailable` | Yes — retry with different instance |
+| `Timeout { .. }` | `InvocationFailed { reason: "transport timeout" }` | Depends on `RetryPolicy` |
+| `Rejected { reason }` | `InvocationFailed { reason }` | No — permanent failure |
+| `Internal(..)` | `Internal` | No |
+
+**Future transport implementations:**
+
+| Implementation | Transport | When to adopt |
+|---|---|---|
+| `DirectClientTransport` (v1) | REST/gRPC via ClientHub | Default — works with current ModKit |
+| `NatsJobTransport` | NATS pub/sub with competing consumers | When throughput requires work distribution queues |
+| `StreamingGrpcTransport` | Bidirectional gRPC streaming (runtime pulls work) | When backpressure and connection-level flow control are needed |
+
+New transport implementations are wired via module configuration — no changes to the orchestrator's domain layer:
+
+```rust
+// In module.rs, during initialization:
+let transport: Arc<dyn JobTransport> = match config.transport.kind.as_str() {
+    "direct" => Arc::new(DirectClientTransport::new(hub, directory, config.transport.strategy)),
+    // Future:
+    // "nats" => Arc::new(NatsJobTransport::new(nats_conn, config.transport.nats)),
+    // "grpc-stream" => Arc::new(StreamingGrpcTransport::new(hub, config.transport.stream)),
+    other => anyhow::bail!("Unknown transport kind: {other}"),
+};
+```
+
+#### 1.4.6 Module Lifecycle
+
+**`sless-orchestrator`** — stateful, with background workers:
+
+```rust
+#[modkit::module(
+    name = "sless-orchestrator",
+    deps = ["types-registry", "authz-resolver", "sless-runtime"],
+    capabilities = [db, rest, stateful],
+    lifecycle(entry = "serve", stop_timeout = "30s", await_ready)
+)]
+pub struct SlessOrchestratorModule {
+    service: OnceLock<Arc<AppServices>>,
+    worker_cancel: Mutex<Option<CancellationToken>>,
+    worker_handles: Mutex<Option<WorkerHandles>>,
+}
+```
+
+Lifecycle integration:
+- The `serve` entry task runs the **Job Worker** polling loop — acquiring a distributed advisory lock, polling queued invocations, dispatching to runtime instances via the `JobTransport` trait (see [1.4.5](#145-job-transport-abstraction)), processing status transitions, and running the Scheduler and Event Trigger Engine as background workers.
+- `CancellationToken` is propagated to all background workers (job worker, scheduler, trigger engine). When the module receives a stop signal, the token is canceled, which:
+  1. Stops accepting new invocations.
+  2. Signals in-flight sync invocations to return a cancellation error.
+  3. Allows in-flight async invocations a grace period (`stop_timeout = "30s"`) to checkpoint and transition to `suspended` status before forced termination.
+- `await_ready` ensures the module's REST routes are not registered until the orchestrator is initialized and runtime connectivity is confirmed.
+
+**`sless-runtime`** — stateless, no background workers:
+
+```rust
+#[modkit::module(
+    name = "sless-runtime",
+    deps = ["types-registry"],
+    capabilities = [rest],
+    lifecycle(entry = "serve", stop_timeout = "10s")
+)]
+pub struct SlessRuntimeModule {
+    executor_pool: OnceLock<Arc<ExecutorPool>>,
+}
+```
+
+The runtime's `serve` entry initializes the executor pool and adapter plugins. On shutdown, `stop_timeout = "10s"` gives in-flight executions time to return partial results. The runtime has no DB, no advisory locks, and no background polling — it is purely reactive.
+
+#### 1.4.7 Database Access and Tenant Isolation
+
+All database access in `sless-orchestrator` goes through `SecureConn` with `AccessScope::for_tenant(tenant_id)`. This enforces row-level tenant isolation at the ORM layer, consistent with the platform security model. (`sless-runtime` has no database.)
+
+**Entity requirements:**
+All SeaORM entities must derive `Scopable` with `#[secure(tenant_col = "tenant_id")]`:
+
+```rust
+#[derive(Clone, Debug, PartialEq, DeriveEntityModel, Scopable)]
+#[sea_orm(table_name = "functions")]
+#[secure(
+    tenant_col = "tenant_id",
+    resource_col = "function_id",
+    no_owner,
+    no_type
+)]
+pub struct Model {
+    #[sea_orm(primary_key, auto_increment = false)]
+    pub function_id: String,
+    pub tenant_id: String,
+    pub version: String,
+    pub status: String,
+    // ...
+}
+```
+
+This applies to all entities in `sless-orchestrator`: `functions`, `workflows`, `invocations`, `invocation_timeline`, `checkpoints`, `schedules`, `event_triggers`, `webhook_triggers`, and `tenant_policies`.
+
+**Cross-tenant sharing** (e.g., system-scoped functions visible to all tenants) must use `AccessScope` elevation, not raw queries that bypass `SecureConn`. The `OwnerRef.owner_type = "system"` case is handled via an elevated `AccessScope` that includes the system tenant scope alongside the requesting tenant's scope.
 
 ## 2. Principles & Constraints
 
@@ -159,6 +788,206 @@ Workflow DSL syntax details are implementation-specific and defined per executor
 
 UI/UX for authoring or debugging workflows is out of scope for this design document.
 
+### 2.3 Industry Comparison and Capability Allocation
+
+This design draws from several industry workflow/serverless platforms. This section maps their capabilities to our architecture and clarifies what the **orchestrator core** provides vs what is delegated to **runtime adapters**.
+
+#### Industry Reference Points
+
+| Platform | Architecture Model | Key Insight for This Design |
+|---|---|---|
+| **Temporal** | Workflows + Activities as peers; deterministic replay; task queues with competing workers | Validates sibling type hierarchy. Replay, step model, and task queues are Temporal-specific — a Temporal adapter would expose these natively. |
+| **Azure Durable Functions** | Orchestrator functions + activity functions; replay-based; built on Azure Storage queues | Replay is runtime-specific. The "orchestrator function" pattern maps to our workflow type. |
+| **AWS Step Functions** | State machine DSL (ASL); states = steps; parallel/choice/wait built into DSL | Step/state model is DSL-specific. Parallel, choice, and wait are all expressible within the adapter's workflow spec. |
+| **AWS Lambda** | Stateless functions; event-driven; no built-in orchestration | Maps directly to our function type with a Lambda adapter. |
+
+#### What the Orchestrator Core Provides
+
+The orchestrator owns capabilities that must be **consistent across all adapters** — the "platform guarantees" that hold regardless of which runtime executes the work:
+
+| Capability | Orchestrator Responsibility | PRD Reference |
+|---|---|---|
+| **Job lifecycle** | Queued → running → completed/failed/canceled state machine, atomic transitions | BR-005, BR-014 |
+| **Retry policy** | Exponential backoff, max attempts, non-retryable error classification | BR-019 |
+| **Function-level compensation** | Invoke `on_failure`/`on_cancel` handlers when a workflow fails or is canceled | BR-133 |
+| **Checkpoint persistence** | Store checkpoint data reported by the runtime; resume from last checkpoint on retry | BR-009 |
+| **Timeout enforcement** | Kill invocations exceeding `timeout_seconds`; timeout reaper for silent runtime failures | BR-028 |
+| **Scheduling & triggers** | Cron/interval schedules, event triggers, webhook triggers — all create invocation jobs | BR-007, BR-022 |
+| **Invocation history & timeline** | Record timeline events for every state transition and step boundary | BR-015, BR-130 |
+| **Tenant isolation & quotas** | Per-tenant concurrency limits, rate limiting, policy enforcement | BR-012, BR-106 |
+| **Idempotency** | Deduplication via `Idempotency-Key` header and tenant-scoped deduplication window | BR-134 |
+| **Version pinning** | In-flight executions pinned to exact function version at start time | BR-029 |
+
+#### What Runtime Adapters Provide
+
+Adapters own capabilities that are **inherently runtime-specific** — different execution engines express these differently or not at all:
+
+| Capability | Adapter Responsibility | Industry Precedent | PRD Reference |
+|---|---|---|---|
+| **Step/activity abstraction** | Define what a "step" is and how steps compose. Temporal has Activities; Step Functions has States; Starlark has function calls. | Temporal Activities, ASL States | BR-104 |
+| **Parallel execution** | Fan-out/fan-in within a workflow. Temporal uses `workflow.Go()`; Step Functions uses `Parallel` state. Adapters that support parallelism spawn multiple `ctx.invoke()` calls concurrently. Starlark v1 is sequential only. | Temporal goroutines, ASL Parallel | BR-105 |
+| **Event waiting / signals** | Suspend execution waiting for an external event. Temporal uses Signals; Step Functions uses `.waitForTaskToken`; a Starlark adapter could expose `ctx.wait_for_event()`. | Temporal Signals, ASL WaitForTaskToken | BR-108 |
+| **Deterministic replay** | Replay execution from event history for fault tolerance. This is a Temporal/Durable Functions concept — not all runtimes need or support it. | Temporal, Azure Durable Functions | — |
+| **Step-level compensation** | Per-step rollback in reverse order. Adapter-specific; the orchestrator provides function-level compensation as a universal safety net. | Temporal Saga, custom | BR-133 |
+| **Sub-workflow invocation** | Calling a child workflow from a parent. The adapter invokes child callables via `SlessOrchestratorClient::invoke()`, which routes through the full orchestrator lifecycle. | Temporal Child Workflows, ASL nested state machines | BR-104 |
+| **Per-step timeouts** | Timeout individual steps within a workflow. The orchestrator enforces the overall `timeout_seconds` (BR-028); adapters enforce step-level timeouts internally. For managed adapters, each `ctx.invoke()` call creates a child invocation with its own `timeout_seconds` from the child function's definition — so per-step timeout is achieved via per-callable timeout. Adapters with native step models (Temporal activities, ASL states) use their own timeout machinery. | Temporal Activity timeouts, ASL TimeoutSeconds per state | BR-028 (overall) |
+| **Conditional branching** | If/else, switch, choice within a workflow. Imperative runtimes (Starlark, Temporal) use native language `if/else`; declarative runtimes define choice states in their workflow spec (e.g., Serverless Workflow `switch` state). No core abstraction needed — this is inherently part of the adapter's execution model and workflow DSL. | ASL Choice, native code | — |
+| **Task queue / worker model** | Work distribution to adapter-specific worker pools. Temporal has task queues; a Starlark adapter uses the `sless-runtime` executor pool directly. | Temporal Task Queues | — |
+| **Workflow DSL** | The authoring language and format. Starlark scripts, YAML specs, Temporal Go/Python SDK, etc. | Per-runtime | Constraint 2.2 |
+
+#### The Adapter Contract
+
+The runtime adapter contract has two parts: the **`RuntimeAdapter` trait** that the adapter implements, and the **`ExecutionContext`** that the orchestrator provides to the adapter during execution.
+
+##### RuntimeAdapter Trait
+
+Every adapter implements this trait:
+
+```rust
+#[async_trait]
+pub trait RuntimeAdapter: Send + Sync {
+    /// Execute a callable with access to host context for orchestrator callbacks.
+    async fn execute(
+        &self,
+        ctx: &dyn ExecutionContext,
+        req: ExecuteRequest,
+    ) -> Result<ExecuteResult, SlessRuntimeError>;
+
+    /// Cancel an in-flight execution.
+    async fn cancel(&self, execution_id: &str) -> Result<(), SlessRuntimeError>;
+
+    /// Handle an adapter-specific control action (via :adapter-control endpoint).
+    /// Only called for actions listed in capabilities().control_actions.
+    async fn handle_control_action(
+        &self,
+        execution_id: &str,
+        action: &str,
+        payload: serde_json::Value,
+    ) -> Result<serde_json::Value, SlessRuntimeError>;
+
+    /// Declare what this adapter supports.
+    fn capabilities(&self) -> AdapterCapabilities;
+}
+```
+
+##### ExecutionContext — Host Callbacks
+
+The orchestrator provides this context to adapters during execution. Adapters call these methods to interact with the orchestrator for side effects that require durability or cross-invocation coordination. Simple adapters (Starlark, Lambda) may ignore the context entirely. Workflow adapters (Serverless Workflow, custom engines) lean on it heavily. Autonomous adapters (Temporal) may bypass it in favor of their own infrastructure.
+
+```rust
+#[async_trait]
+pub trait ExecutionContext: Send + Sync {
+    /// Invoke a child callable through the full orchestrator lifecycle.
+    /// `callable_id` can reference either a Function or a Workflow —
+    /// both resolve through the orchestrator's invocation stack with
+    /// their own retry, timeout, and compensation.
+    /// Blocks until child completes.
+    ///
+    /// For parallel execution, adapters spawn multiple invoke() calls
+    /// concurrently using standard async patterns:
+    ///
+    ///   let (a, b) = tokio::join!(
+    ///       ctx.invoke("fn_a", params_a),
+    ///       ctx.invoke("fn_b", params_b),
+    ///   );
+    ///
+    async fn invoke(
+        &self,
+        callable_id: &str,
+        params: serde_json::Value,
+    ) -> Result<InvocationResult, ContextError>;
+
+    /// Persist a checkpoint. On retry/recovery, the adapter receives the
+    /// last checkpoint in ExecuteRequest.last_checkpoint.
+    async fn checkpoint(
+        &self,
+        state: serde_json::Value,
+    ) -> Result<(), ContextError>;
+
+    /// Suspend execution waiting for an external event matching the filter.
+    /// The orchestrator persists the suspended state and resumes the adapter
+    /// (by re-calling execute with the event data in last_checkpoint) when
+    /// a matching event arrives via :adapter-control or trigger.
+    async fn wait_for_event(
+        &self,
+        filter: EventFilter,
+    ) -> Result<serde_json::Value, ContextError>;
+
+    /// Suspend execution for a duration (durable timer).
+    /// The orchestrator persists the timer and resumes after expiry.
+    async fn sleep(&self, duration: Duration) -> Result<(), ContextError>;
+
+    /// Report a timeline event for observability. The orchestrator stores
+    /// these in the invocation timeline and serves them via the timeline API.
+    async fn report_event(
+        &self,
+        event: TimelineEvent,
+    ) -> Result<(), ContextError>;
+}
+```
+
+**Usage by adapter type:**
+
+| Adapter Type | `invoke` | `checkpoint` | `wait_for_event` | `sleep` | `report_event` | `handle_control_action` |
+|---|---|---|---|---|---|---|
+| **Starlark** (simple function) | — | — | — | — | — | — |
+| **Serverless Workflow 1.0** (declarative engine) | child function/workflow calls | after each state transition | event-waiting states | sleep states | state entry/exit events | `send-event`, `get-state` |
+| **Custom Rust workflow engine** | composition calls | after each step | signal/event waiting | timers | step-level tracing | engine-specific actions |
+| **Temporal** (autonomous) | — (uses own SDK) | — (own event sourcing) | — (own signals) | — (own timers) | step boundaries for timeline | `signal`, `query`, `reset` |
+
+##### Capability Declaration
+
+Adapters declare their capabilities via `AdapterCapabilities`. The orchestrator uses this for:
+- **Registration-time validation** — reject workflows that require capabilities the adapter doesn't support
+- **API discovery** — populate `adapter_capabilities` in the invocation response so clients know what actions are available
+- **`:adapter-control` validation** — reject unsupported actions before forwarding to the adapter
+
+```rust
+pub struct AdapterCapabilities {
+    /// Adapter-specific control actions (e.g., "signal", "query").
+    pub control_actions: Vec<ControlActionSpec>,
+    /// Whether the adapter supports parallel execution within workflows.
+    pub parallel: bool,
+    /// Whether the adapter supports event waiting / signals.
+    pub event_waiting: bool,
+    /// Whether the adapter supports deterministic replay.
+    pub replay: bool,
+    /// Whether the adapter supports step-level compensation.
+    pub step_compensation: bool,
+    /// Whether the adapter manages its own execution lifecycle (autonomous).
+    /// When true, the orchestrator acts as a thin proxy and does not manage
+    /// retry, timeout, or checkpoint storage for this adapter.
+    pub autonomous: bool,
+}
+
+pub struct ControlActionSpec {
+    /// Action name (used in the :adapter-control request body).
+    pub name: String,
+    /// Human-readable description.
+    pub description: String,
+    /// JSON Schema for the expected payload (for client-side validation/discovery).
+    pub payload_schema: Option<serde_json::Value>,
+    /// Valid invocation states from which this action can be called.
+    pub valid_from_states: Vec<InvocationStatus>,
+}
+```
+
+The `autonomous` flag is the key differentiator: when `true`, the orchestrator delegates the full execution lifecycle to the adapter and only mirrors status. When `false`, the orchestrator manages retry, timeout, and checkpoint storage using the `ExecutionContext` callbacks.
+
+#### Implications for PRD Feature Coverage
+
+| PRD Feature | Covered By | Notes |
+|---|---|---|
+| Parallel execution (BR-105) | Runtime adapter | Adapter uses `ctx.invoke()` concurrently or manages parallelism internally. Orchestrator validates adapter declares `parallel: true` at registration time. |
+| Event waiting (BR-108) | Runtime adapter via `ctx.wait_for_event()` + orchestrator `suspended` state + `:adapter-control` for event delivery | Adapter suspends; orchestrator persists state; external events arrive via `:adapter-control` `send-event` action or trigger, and orchestrator resumes the adapter. |
+| Sub-workflow (BR-104) | Runtime adapter via `ctx.invoke()` | Child invocations are full orchestrator-managed jobs with their own lifecycle, retry, and compensation. |
+| Per-step timeout (BR-028) | Both — overall timeout (orchestrator), step-level (adapter) | Orchestrator enforces `timeout_seconds` on the invocation. For managed adapters, each `ctx.invoke()` child has its own timeout from its function definition. Autonomous adapters (Temporal) use native activity/step timeouts. |
+| Compensation (BR-133) | Both — function-level (orchestrator), step-level (adapter) | Two-layer model already documented in section 3.1. |
+| Replay (BR-124) | Runtime adapter + orchestrator timeline | Orchestrator provides timeline event history via `report_event()`; adapter implements deterministic replay if supported (declared via `replay: true`). |
+| Visualization (BR-125) | Orchestrator timeline API | Timeline events are adapter-reported via `ctx.report_event()` but stored and served by the orchestrator. Works for all adapters. |
+
+This allocation means the orchestrator can ship with a simple adapter (e.g., Starlark for sequential function chains) while the full workflow orchestration feature set (parallel, signals, replay) is unlocked by plugging in a capable adapter like Temporal or a Serverless Workflow 1.0 engine. The PRD features are achievable — they are allocated to the right layer rather than forced into the core.
+
 ## 3. Technical Architecture
 
 ### 3.1 Domain Model
@@ -171,29 +1000,29 @@ UI/UX for authoring or debugging workflows is out of scope for this design docum
 
 | Entity | GTS Type ID | Description |
 |--------|-------------|-------------|
-| Function | `gts.x.core.serverless.function.v1~` | Base callable — stateless, short-lived function or workflow base type |
-| Workflow | `gts.x.core.serverless.function.v1~x.core.serverless.workflow.v1~` | Durable, multi-step orchestration extending Function |
-| InvocationRecord | `gts.x.core.serverless.invocation.v1~` | Tracks lifecycle of a single execution |
-| Schedule | `gts.x.core.serverless.schedule.v1~` | Recurring trigger for a function |
-| Trigger | `gts.x.core.serverless.trigger.v1~` | Event-driven invocation binding |
-| Webhook Trigger | `gts.x.core.serverless.webhook_trigger.v1~` | HTTP endpoint trigger for external systems |
-| TenantRuntimePolicy | `gts.x.core.serverless.tenant_policy.v1~` | Tenant-level governance settings |
+| Function | `gts.x.core.sless.function.v1~` | Base callable — stateless, short-lived function base type |
+| Workflow | `gts.x.core.sless.workflow.v1~` | Durable, multi-step orchestration — sibling type to Function, not derived from it |
+| InvocationRecord | `gts.x.core.sless.invocation.v1~` | Tracks lifecycle of a single execution |
+| Schedule | `gts.x.core.sless.schedule.v1~` | Recurring trigger for a function |
+| Trigger | `gts.x.core.sless.trigger.v1~` | Event-driven invocation binding |
+| Webhook Trigger | `gts.x.core.sless.webhook_trigger.v1~` | HTTP endpoint trigger for external systems |
+| TenantRuntimePolicy | `gts.x.core.sless.tenant_policy.v1~` | Tenant-level governance settings |
 
 #### Supporting Types
 
 | GTS Type | Description |
 |----------|-------------|
-| `gts.x.core.serverless.owner_ref.v1~` | Ownership reference with visibility semantics |
-| `gts.x.core.serverless.io_schema.v1~` | Input/output contract (GTS ref, schema, void) |
-| `gts.x.core.serverless.limits.v1~` | Base limits (adapters derive specific types) |
-| `gts.x.core.serverless.rate_limit.v1~` | Rate limiting configuration (plugin-based) |
-| `gts.x.core.serverless.retry_policy.v1~` | Retry behavior configuration |
-| `gts.x.core.serverless.implementation.v1~` | Code, spec, or adapter reference |
-| `gts.x.core.serverless.workflow_traits.v1~` | Workflow-specific execution traits |
-| `gts.x.core.serverless.compensation_context.v1~` | Input envelope passed to compensation functions |
-| `gts.x.core.serverless.status.v1~` | Invocation status (derived types per state) |
-| `gts.x.core.serverless.err.v1~` | Error types (derived types per error kind) |
-| `gts.x.core.serverless.timeline_event.v1~` | Invocation timeline event for execution history |
+| `gts.x.core.sless.owner_ref.v1~` | Ownership reference with visibility semantics |
+| `gts.x.core.sless.io_schema.v1~` | Input/output contract (GTS ref, schema, void) |
+| `gts.x.core.sless.limits.v1~` | Base limits (adapters derive specific types) |
+| `gts.x.core.sless.rate_limit.v1~` | Rate limiting configuration (plugin-based) |
+| `gts.x.core.sless.retry_policy.v1~` | Retry behavior configuration |
+| `gts.x.core.sless.implementation.v1~` | Code, spec, or adapter reference |
+| `gts.x.core.sless.workflow_traits.v1~` | Workflow-specific execution traits |
+| `gts.x.core.sless.compensation_context.v1~` | Input envelope passed to compensation functions |
+| `gts.x.core.sless.status.v1~` | Invocation status (derived types per state) |
+| `gts.x.core.sless.err.v1~` | Error types (derived types per error kind) |
+| `gts.x.core.sless.timeline_event.v1~` | Invocation timeline event for execution history |
 
 #### Executor
 
@@ -202,14 +1031,14 @@ An executor is a native module that executes functions and/or workflows. The plu
 #### Functions
 
 Functions and workflows are unified as **functions** — registered definitions that can be invoked via the runtime API.
-They are distinguished via GTS type inheritance:
+They are distinguished via their GTS base types, which are siblings — neither derives from the other:
 
-| Function Type | Description |
+| GTS Type | Description |
 |-----------------|-------------|
-| gts.x.core.serverless.function.v1~ | Base function type (any callable) |
-| gts.x.core.serverless.function.v1~x.core.serverless.workflow.v1~ | Workflow type (extends function) |
-| gts.x.core.serverless.function.v1~vendor.app.my_func.v1~ | Custom function |
-| gts.x.core.serverless.function.v1~x.core.serverless.workflow.v1~vendor.app.my_workflow.v1~ | Custom workflow |
+| `gts.x.core.sless.function.v1~` | Function base type (stateless, short-lived callable) |
+| `gts.x.core.sless.workflow.v1~` | Workflow base type (durable, multi-step callable) — sibling to function, not derived |
+| `gts.x.core.sless.function.v1~vendor.app.my_func.v1~` | Custom function (derived from function base) |
+| `gts.x.core.sless.workflow.v1~vendor.app.my_workflow.v1~` | Custom workflow (derived from workflow base) |
 
 ##### Invocation modes
 
@@ -220,7 +1049,7 @@ They are distinguished via GTS type inheritance:
 
 #### OwnerRef
 
-**GTS ID:** `gts.x.core.serverless.owner_ref.v1~`
+**GTS ID:** `gts.x.core.sless.owner_ref.v1~`
 
 Defines ownership and default visibility for a function. Per PRD BR-002, the `owner_type` determines
 the default access scope:
@@ -231,11 +1060,11 @@ the default access scope:
 
 Extended sharing beyond default visibility is managed through access control integration (PRD BR-123).
 
-> Schema: [`gts.x.core.serverless.owner_ref.v1~`](DESIGN_GTS_SCHEMAS.md#ownerref)
+> Schema: [`gts.x.core.sless.owner_ref.v1~`](DESIGN_GTS_SCHEMAS.md#ownerref)
 
 #### IOSchema
 
-**GTS ID:** `gts.x.core.serverless.io_schema.v1~`
+**GTS ID:** `gts.x.core.sless.io_schema.v1~`
 
 Defines the input/output contract for a function. Per PRD BR-032 and BR-037, inputs and outputs
 are validated before invocation.
@@ -246,11 +1075,11 @@ Each of `params` and `returns` accepts:
 - **GTS reference** — `{ "$ref": "gts://gts.x.some.type.v1~" }` for reusable types
 - **Void** — `null` or absent indicates no input/output
 
-> Schema: [`gts.x.core.serverless.io_schema.v1~`](DESIGN_GTS_SCHEMAS.md#ioschema)
+> Schema: [`gts.x.core.sless.io_schema.v1~`](DESIGN_GTS_SCHEMAS.md#ioschema)
 
 #### Limits
 
-**GTS ID:** `gts.x.core.serverless.limits.v1~`
+**GTS ID:** `gts.x.core.sless.limits.v1~`
 
 Base resource limits schema. Per PRD BR-005, BR-012, and BR-028, the runtime enforces limits to
 prevent resource exhaustion and runaway executions.
@@ -264,7 +1093,7 @@ on the `implementation.adapter` field.
 - `timeout_seconds` — maximum execution duration before termination (BR-028)
 - `max_concurrent` — maximum concurrent invocations of this function (BR-012)
 
-> Schema: [`gts.x.core.serverless.limits.v1~`](DESIGN_GTS_SCHEMAS.md#limits-base)
+> Schema: [`gts.x.core.sless.limits.v1~`](DESIGN_GTS_SCHEMAS.md#limits-base)
 
 ##### Adapter-Derived Limits (Examples)
 
@@ -272,21 +1101,21 @@ Adapters register their own GTS types extending the base:
 
 | GTS Type | Adapter | Additional Fields |
 |----------|---------|-------------------|
-| `gts.x.core.serverless.limits.v1~x.core.serverless.adapter.starlark.limits.v1~` | Starlark | `memory_mb`, `cpu` |
-| `gts.x.core.serverless.limits.v1~x.core.serverless.adapter.lambda.limits.v1~` | AWS Lambda | `memory_mb`, `ephemeral_storage_mb` |
-| `gts.x.core.serverless.limits.v1~x.core.serverless.adapter.temporal.limits.v1~` | Temporal | (worker-based, no per-execution limits) |
+| `gts.x.core.sless.limits.v1~x.core.sless.runtime.starlark.limits.v1~` | Starlark | `memory_mb`, `cpu` |
+| `gts.x.core.sless.limits.v1~x.core.sless.runtime.lambda.limits.v1~` | AWS Lambda | `memory_mb`, `ephemeral_storage_mb` |
+| `gts.x.core.sless.limits.v1~x.core.sless.runtime.temporal.limits.v1~` | Temporal | (worker-based, no per-execution limits) |
 
 ##### Example: Starlark Adapter Limits
 
-> Schema: [`gts.x.core.serverless.limits.v1~x.core.serverless.adapter.starlark.limits.v1~`](DESIGN_GTS_SCHEMAS.md#starlark-adapter-limits)
+> Schema: [`gts.x.core.sless.limits.v1~x.core.sless.runtime.starlark.limits.v1~`](DESIGN_GTS_SCHEMAS.md#starlark-adapter-limits)
 
 ##### Example: Lambda Adapter Limits
 
-> Schema: [`gts.x.core.serverless.limits.v1~x.core.serverless.adapter.lambda.limits.v1~`](DESIGN_GTS_SCHEMAS.md#lambda-adapter-limits)
+> Schema: [`gts.x.core.sless.limits.v1~x.core.sless.runtime.lambda.limits.v1~`](DESIGN_GTS_SCHEMAS.md#lambda-adapter-limits)
 
 #### RetryPolicy
 
-**GTS ID:** `gts.x.core.serverless.retry_policy.v1~`
+**GTS ID:** `gts.x.core.sless.retry_policy.v1~`
 
 Configures retry behavior for failed invocations. Per PRD BR-019, supports exponential backoff
 with configurable limits:
@@ -319,11 +1148,11 @@ without changing the error's category at the source.
 Errors with any other `RuntimeErrorCategory` (`NonRetryable`, `ResourceLimit`, `Timeout`,
 `Canceled`) are never retried, irrespective of their presence in `non_retryable_errors`.
 
-> Schema: [`gts.x.core.serverless.retry_policy.v1~`](DESIGN_GTS_SCHEMAS.md#retrypolicy)
+> Schema: [`gts.x.core.sless.retry_policy.v1~`](DESIGN_GTS_SCHEMAS.md#retrypolicy)
 
 #### RateLimit
 
-**GTS ID:** `gts.x.core.serverless.rate_limit.v1~`
+**GTS ID:** `gts.x.core.sless.rate_limit.v1~`
 
 Configures rate limiting for a function. Rate limiting is implemented as a **plugin** — the
 platform provides a default rate limiter, but operators can register custom rate limiter
@@ -347,7 +1176,7 @@ The function's `rate_limit` field uses a `strategy` + `config` structure to refe
 limiter: `strategy` is the GTS type ID of the plugin, `config` is an opaque object validated by
 that plugin. This structure is defined inline in the function schema, not in the base type.
 
-> Schema: [`gts.x.core.serverless.rate_limit.v1~`](DESIGN_GTS_SCHEMAS.md#ratelimit-base)
+> Schema: [`gts.x.core.sless.rate_limit.v1~`](DESIGN_GTS_SCHEMAS.md#ratelimit-base)
 
 ##### Plugin-Derived Config Schemas
 
@@ -356,8 +1185,8 @@ object in the function's `rate_limit` field:
 
 | `strategy` GTS Type | Strategy | `config` Fields |
 |----------------------|----------|-----------------|
-| `...rate_limit.token_bucket.v1~` | Token bucket (system default) | `max_requests_per_second`, `max_requests_per_minute`, `burst_size` |
-| `...rate_limit.sliding_window.v1~` | Sliding window (example) | `window_size_seconds`, `max_requests_per_window` |
+| `gts.x.core.sless.rate_limit.v1~x.core.sless.rate_limit.token_bucket.v1~` | Token bucket (system default) | `max_requests_per_second`, `max_requests_per_minute`, `burst_size` |
+| `gts.x.core.sless.rate_limit.v1~x.core.sless.rate_limit.sliding_window.v1~` | Sliding window (example) | `window_size_seconds`, `max_requests_per_window` |
 
 ##### Default: Token Bucket Rate Limiter
 
@@ -375,13 +1204,13 @@ for this function.
 
 ###### Config Schema
 
-> Schema: [`gts.x.core.serverless.rate_limit.v1~x.core.serverless.rate_limit.token_bucket.v1~`](DESIGN_GTS_SCHEMAS.md#token-bucket-rate-limit-config)
+> Schema: [`gts.x.core.sless.rate_limit.v1~x.core.sless.rate_limit.token_bucket.v1~`](DESIGN_GTS_SCHEMAS.md#token-bucket-rate-limit-config)
 
 ##### Instance Example (Token Bucket)
 
 ```json
 {
-  "strategy": "gts.x.core.serverless.rate_limit.v1~x.core.serverless.rate_limit.token_bucket.v1~",
+  "strategy": "gts.x.core.sless.rate_limit.v1~x.core.sless.rate_limit.token_bucket.v1~",
   "config": {
     "max_requests_per_second": 50,
     "max_requests_per_minute": 1000,
@@ -420,7 +1249,7 @@ When an invocation is rejected due to rate limiting:
 - The HTTP API returns **`429 Too Many Requests`** with a `Retry-After` header indicating when the
   caller may retry (in seconds).
 - The response body is an RFC 9457 Problem Details JSON with error type
-  `gts.x.core.serverless.err.v1~x.core.serverless.err.rate_limited.v1~`.
+  `gts.x.core.sless.err.v1~x.core.sless.err.rate_limited.v1~`.
 - The invocation is **not** created — no `InvocationRecord` is persisted and no retries are
   attempted by the runtime. The caller is responsible for respecting `Retry-After` and retrying.
 
@@ -434,7 +1263,7 @@ Retry-After: 2
 
 ```json
 {
-  "type": "gts://gts.x.core.serverless.err.v1~x.core.serverless.err.rate_limited.v1~",
+  "type": "gts://gts.x.core.sless.err.v1~x.core.sless.err.rate_limited.v1~",
   "title": "Rate Limit Exceeded",
   "status": 429,
   "detail": "Function rate limit exceeded for tenant t_123. Retry after 2 seconds.",
@@ -445,14 +1274,14 @@ Retry-After: 2
 
 #### Implementation
 
-**GTS ID:** `gts.x.core.serverless.implementation.v1~`
+**GTS ID:** `gts.x.core.sless.implementation.v1~`
 
 Defines how a function is implemented. The `adapter` field explicitly identifies the runtime
 adapter, enabling validation of adapter-specific limits and traits.
 
 ##### Fields
 
-- `adapter` — GTS type ID of the adapter (e.g., `gts.x.core.serverless.adapter.starlark.v1~`). Required for limits
+- `adapter` — GTS type ID of the adapter (e.g., `gts.x.core.sless.runtime.starlark.v1~`). Required for limits
   validation.
 - `kind` — implementation kind: `code`, `workflow_spec`, or `adapter_ref`
 - Kind-specific payload with implementation details
@@ -463,18 +1292,18 @@ adapter, enabling validation of adapter-specific limits and traits.
 - `workflow_spec` — declarative workflow definition (Serverless Workflow DSL, Temporal, etc.)
 - `adapter_ref` — reference to an adapter-provided definition for hot-plug registration (PRD BR-035)
 
-> Schema: [`gts.x.core.serverless.implementation.v1~`](DESIGN_GTS_SCHEMAS.md#implementation)
+> Schema: [`gts.x.core.sless.implementation.v1~`](DESIGN_GTS_SCHEMAS.md#implementation)
 
 ##### Validation Flow
 
-1. Parse `implementation.adapter` to get the adapter GTS type (e.g., `gts.x.core.serverless.adapter.starlark.v1~`)
-2. Derive the adapter's limits schema: `gts.x.core.serverless.limits.v1~x.core.serverless.adapter.starlark.limits.v1~`
+1. Parse `implementation.adapter` to get the adapter GTS type (e.g., `gts.x.core.sless.runtime.starlark.v1~`)
+2. Derive the adapter's limits schema: `gts.x.core.sless.limits.v1~x.core.sless.runtime.starlark.limits.v1~`
 3. Validate `traits.limits` against the derived limits schema
 4. Reject function if limits contain fields not supported by the adapter
 
 #### WorkflowTraits
 
-**GTS ID:** `gts.x.core.serverless.workflow_traits.v1~`
+**GTS ID:** `gts.x.core.sless.workflow_traits.v1~`
 
 Workflow-specific execution traits required for durable orchestrations. Includes:
 
@@ -501,17 +1330,17 @@ that implements the compensation logic:
 - `on_cancel` — GTS ID of function to invoke when workflow is canceled, or `null` for no compensation
 
 The referenced compensation function is invoked as a standard function with a single JSON body
-conforming to the `CompensationContext` schema (`gts.x.core.serverless.compensation_context.v1~`).
+conforming to the `CompensationContext` schema (`gts.x.core.sless.compensation_context.v1~`).
 This context carries the original invocation identity, failure details, and a workflow state snapshot
 so the handler has everything it needs to perform rollback operations. See the
 [CompensationContext](#compensationcontext) section below for the full schema, field descriptions,
 and usage examples.
 
-> Schema: [`gts.x.core.serverless.workflow_traits.v1~`](DESIGN_GTS_SCHEMAS.md#workflowtraits)
+> Schema: [`gts.x.core.sless.workflow_traits.v1~`](DESIGN_GTS_SCHEMAS.md#workflowtraits)
 
 #### CompensationContext
 
-**GTS ID:** `gts.x.core.serverless.compensation_context.v1~`
+**GTS ID:** `gts.x.core.sless.compensation_context.v1~`
 
 Defines the input envelope passed to compensation functions referenced by
 `traits.workflow.compensation.on_failure` and `traits.workflow.compensation.on_cancel`.
@@ -543,7 +1372,7 @@ allowing adapters full flexibility in their state representation.
 
 ##### GTS Schema
 
-> Schema: [`gts.x.core.serverless.compensation_context.v1~`](DESIGN_GTS_SCHEMAS.md#compensationcontext)
+> Schema: [`gts.x.core.sless.compensation_context.v1~`](DESIGN_GTS_SCHEMAS.md#compensationcontext)
 
 ##### Example Payload
 
@@ -572,7 +1401,7 @@ and invokes the `on_failure` function:
   },
   "timestamp": "2026-02-08T10:00:47Z",
   "invocation_metadata": {
-    "function_id": "gts.x.core.serverless.function.v1~x.core.serverless.workflow.v1~vendor.app.orders.process_order.v1~",
+    "function_id": "gts.x.core.sless.workflow.v1~vendor.app.orders.process_order.v1~",
     "original_input": {
       "order_id": "ORD-9182",
       "items": [
@@ -627,33 +1456,33 @@ When registering or updating a workflow with `traits.workflow.compensation.on_fa
 
 1. The referenced function **must** exist and be in `active` status.
 2. The referenced function's `schema.params` **must** accept `CompensationContext`
-   (`$ref: "gts://gts.x.core.serverless.compensation_context.v1~"` or a compatible superset).
+   (`$ref: "gts://gts.x.core.sless.compensation_context.v1~"` or a compatible superset).
 3. The platform rejects registration if either condition is not met.
 
 #### InvocationStatus
 
-**GTS ID:** `gts.x.core.serverless.status.v1~`
+**GTS ID:** `gts.x.core.sless.status.v1~`
 
 Invocation lifecycle states. Each state is a derived GTS type extending the base status type.
 Per PRD BR-015 and BR-014, invocations transition through these states during their lifecycle.
 
 ##### GTS Schema
 
-> Schema: [`gts.x.core.serverless.status.v1~`](DESIGN_GTS_SCHEMAS.md#invocationstatus)
+> Schema: [`gts.x.core.sless.status.v1~`](DESIGN_GTS_SCHEMAS.md#invocationstatus)
 
 ##### Derived Status Types
 
 | GTS Type | Description |
 |----------|-------------|
-| `gts.x.core.serverless.status.v1~x.core.serverless.status.queued.v1~` | Waiting to be scheduled |
-| `gts.x.core.serverless.status.v1~x.core.serverless.status.running.v1~` | Currently executing |
-| `gts.x.core.serverless.status.v1~x.core.serverless.status.suspended.v1~` | Paused, waiting for event or signal |
-| `gts.x.core.serverless.status.v1~x.core.serverless.status.succeeded.v1~` | Completed successfully |
-| `gts.x.core.serverless.status.v1~x.core.serverless.status.failed.v1~` | Failed after retries exhausted |
-| `gts.x.core.serverless.status.v1~x.core.serverless.status.canceled.v1~` | Canceled by user or system |
-| `gts.x.core.serverless.status.v1~x.core.serverless.status.compensating.v1~` | Running compensation logic |
-| `gts.x.core.serverless.status.v1~x.core.serverless.status.compensated.v1~` | Compensation completed successfully (rollback done) |
-| `gts.x.core.serverless.status.v1~x.core.serverless.status.dead_lettered.v1~` | Moved to dead letter queue (BR-027) |
+| `gts.x.core.sless.status.v1~x.core.sless.status.queued.v1~` | Waiting to be scheduled |
+| `gts.x.core.sless.status.v1~x.core.sless.status.running.v1~` | Currently executing |
+| `gts.x.core.sless.status.v1~x.core.sless.status.suspended.v1~` | Paused, waiting for event or signal |
+| `gts.x.core.sless.status.v1~x.core.sless.status.succeeded.v1~` | Completed successfully |
+| `gts.x.core.sless.status.v1~x.core.sless.status.failed.v1~` | Failed after retries exhausted |
+| `gts.x.core.sless.status.v1~x.core.sless.status.canceled.v1~` | Canceled by user or system |
+| `gts.x.core.sless.status.v1~x.core.sless.status.compensating.v1~` | Running compensation logic |
+| `gts.x.core.sless.status.v1~x.core.sless.status.compensated.v1~` | Compensation completed successfully (rollback done) |
+| `gts.x.core.sless.status.v1~x.core.sless.status.dead_lettered.v1~` | Moved to dead letter queue (BR-027) |
 
 ##### Invocation Status State Machine
 
@@ -715,30 +1544,30 @@ Replay is valid from `succeeded` or `failed` terminal states.
 
 #### Error
 
-**GTS ID:** `gts.x.core.serverless.err.v1~`
+**GTS ID:** `gts.x.core.sless.err.v1~`
 
 Standardized error types for invocation failures. Per PRD BR-129, errors include a stable identifier,
 human-readable message, and structured details.
 
 ##### GTS Schema
 
-> Schema: [`gts.x.core.serverless.err.v1~`](DESIGN_GTS_SCHEMAS.md#error)
+> Schema: [`gts.x.core.sless.err.v1~`](DESIGN_GTS_SCHEMAS.md#error)
 
 ##### Derived Error Types
 
 | GTS Type | HTTP | Description |
 |----------|------|-------------|
-| `gts.x.core.serverless.err.v1~x.core.serverless.err.validation.v1~` | 422 | Input or definition validation failure |
-| `gts.x.core.serverless.err.v1~x.core.serverless.err.rate_limited.v1~` | 429 | Per-function rate limit exceeded |
-| `gts.x.core.serverless.err.v1~x.core.serverless.err.not_found.v1~` | 404 | Referenced entity does not exist |
-| `gts.x.core.serverless.err.v1~x.core.serverless.err.not_active.v1~` | 409 | Function exists but is not in active state |
-| `gts.x.core.serverless.err.v1~x.core.serverless.err.quota_exceeded.v1~` | 429 | Tenant quota capacity reached |
-| `gts.x.core.serverless.err.v1~x.core.serverless.err.runtime_timeout.v1~` | 504 | Execution exceeded its configured timeout |
-| `gts.x.core.serverless.err.v1~x.core.serverless.err.sync_suspension.v1~` | 409 | Workflow reached a suspension point during synchronous invocation |
+| `gts.x.core.sless.err.v1~x.core.sless.err.validation.v1~` | 422 | Input or definition validation failure |
+| `gts.x.core.sless.err.v1~x.core.sless.err.rate_limited.v1~` | 429 | Per-function rate limit exceeded |
+| `gts.x.core.sless.err.v1~x.core.sless.err.not_found.v1~` | 404 | Referenced entity does not exist |
+| `gts.x.core.sless.err.v1~x.core.sless.err.not_active.v1~` | 409 | Function exists but is not in active state |
+| `gts.x.core.sless.err.v1~x.core.sless.err.quota_exceeded.v1~` | 429 | Tenant quota capacity reached |
+| `gts.x.core.sless.err.v1~x.core.sless.err.runtime_timeout.v1~` | 504 | Execution exceeded its configured timeout |
+| `gts.x.core.sless.err.v1~x.core.sless.err.sync_suspension.v1~` | 409 | Workflow reached a suspension point during synchronous invocation |
 
 #### ValidationError
 
-**GTS ID:** `gts.x.core.serverless.err.v1~x.core.serverless.err.validation.v1~`
+**GTS ID:** `gts.x.core.sless.err.v1~x.core.sless.err.validation.v1~`
 
 Validation error for definition and input validation failures. Per PRD BR-011, validation errors
 include the location in the definition and suggested corrections. Returned only when validation fails;
@@ -747,22 +1576,22 @@ each with its own error type and location.
 
 ##### GTS Schema
 
-> Schema: [`gts.x.core.serverless.err.v1~x.core.serverless.err.validation.v1~`](DESIGN_GTS_SCHEMAS.md#validationerror)
+> Schema: [`gts.x.core.sless.err.v1~x.core.sless.err.validation.v1~`](DESIGN_GTS_SCHEMAS.md#validationerror)
 
 #### InvocationTimelineEvent
 
-**GTS ID:** `gts.x.core.serverless.timeline_event.v1~`
+**GTS ID:** `gts.x.core.sless.timeline_event.v1~`
 
 Represents a single event in the invocation execution timeline. Used for debugging, auditing,
 and execution history visualization per PRD BR-015 and BR-130.
 
 ##### GTS Schema
 
-> Schema: [`gts.x.core.serverless.timeline_event.v1~`](DESIGN_GTS_SCHEMAS.md#invocationtimelineevent)
+> Schema: [`gts.x.core.sless.timeline_event.v1~`](DESIGN_GTS_SCHEMAS.md#invocationtimelineevent)
 
 #### Function (Base Type)
 
-**GTS ID:** `gts.x.core.serverless.function.v1~`
+**GTS ID:** `gts.x.core.sless.function.v1~`
 
 The base function schema defines common fields for all callable entities (functions and workflows). Functions are the default — stateless, short-lived callables designed for request/response invocation:
 
@@ -773,7 +1602,7 @@ The base function schema defines common fields for all callable entities (functi
 - Wait states are supported via execution suspension and later resumption, triggered by events, timers, or API callbacks; for functions this is an advanced capability available only for asynchronous execution
 - Functions may have a long-running **streaming** mode where information is streamed to/from a client or another service; these are a category of asynchronous execution and receive an `invocation_id` that enables checkpointing and restart via durable streams
 
-Workflows extend this base type with additional traits (compensation, checkpointing, suspension) — see the [Workflow](#workflow) section.
+Workflows share the same base schema fields but are a sibling GTS type — see the [Workflow](#workflow) section.
 
 ##### Function Status State Machine
 
@@ -841,17 +1670,17 @@ Functions follow semantic versioning aligned with GTS conventions:
 
 **Example:**
 ```
-gts.x.core.serverless.function.v1~vendor.app.billing.calculate_tax.v2~      # Latest v2.x
-gts.x.core.serverless.function.v1~vendor.app.billing.calculate_tax.v2.3~    # Exact v2.3
+gts.x.core.sless.function.v1~vendor.app.billing.calculate_tax.v2~      # Latest v2.x
+gts.x.core.sless.function.v1~vendor.app.billing.calculate_tax.v2.3~    # Exact v2.3
 ```
 
 ##### GTS Schema
 
-> Schema: [`gts.x.core.serverless.function.v1~`](DESIGN_GTS_SCHEMAS.md#function-base-type)
+> Schema: [`gts.x.core.sless.function.v1~`](DESIGN_GTS_SCHEMAS.md#function-base-type)
 
 ##### Instance Example (Function)
 
-GTS Address: `gts.x.core.serverless.function.v1~vendor.app.billing.calculate_tax.v1~`
+GTS Address: `gts.x.core.sless.function.v1~vendor.app.billing.calculate_tax.v1~`
 
 ```json
 {
@@ -897,7 +1726,7 @@ GTS Address: `gts.x.core.serverless.function.v1~vendor.app.billing.calculate_tax
       }
     },
     "errors": [
-      "gts.x.core.serverless.err.v1~x.core.serverless.err.validation.v1~"
+      "gts.x.core.sless.err.v1~x.core.sless.err.validation.v1~"
     ]
   },
   "traits": {
@@ -913,7 +1742,7 @@ GTS Address: `gts.x.core.serverless.function.v1~vendor.app.billing.calculate_tax
       "max_age_seconds": 0
     },
     "rate_limit": {
-      "strategy": "gts.x.core.serverless.rate_limit.v1~x.core.serverless.rate_limit.token_bucket.v1~",
+      "strategy": "gts.x.core.sless.rate_limit.v1~x.core.sless.rate_limit.token_bucket.v1~",
       "config": {
         "max_requests_per_second": 50,
         "max_requests_per_minute": 1000,
@@ -934,7 +1763,7 @@ GTS Address: `gts.x.core.serverless.function.v1~vendor.app.billing.calculate_tax
     }
   },
   "implementation": {
-    "adapter": "gts.x.core.serverless.adapter.starlark.v1~",
+    "adapter": "gts.x.core.sless.runtime.starlark.v1~",
     "kind": "code",
     "code": {
       "language": "starlark",
@@ -948,7 +1777,7 @@ GTS Address: `gts.x.core.serverless.function.v1~vendor.app.billing.calculate_tax
 
 #### Workflow
 
-**GTS ID:** `gts.x.core.serverless.function.v1~x.core.serverless.workflow.v1~`
+**GTS ID:** `gts.x.core.sless.workflow.v1~`
 
 Workflows are durable, multi-step orchestrations that coordinate actions over time:
 
@@ -969,7 +1798,7 @@ The common Serverless Runtime provides reusable mechanisms such as an HTTP clien
 
 ##### Functions vs. Workflows
 
-The function/workflow distinction is **structural**, not modal: a workflow is a function whose definition includes `workflow_traits` (compensation, checkpointing, event waiting). Execution mode (sync vs async) is orthogonal to type — both functions and workflows can be invoked in either mode. See [ADR — Function as Base Callable Type](ADR/0001-cpt-cf-serverless-runtime-adr-callable-type-hierarchy.md) for the full rationale.
+The function/workflow distinction is **structural**, not modal: a workflow is a callable registered under the `gts.x.core.sless.workflow.v1~` base type and carries `workflow_traits` (compensation, checkpointing, event waiting). Function and Workflow are sibling GTS base types — Workflow is not derived from Function. Execution mode (sync vs async) is orthogonal to type — both functions and workflows can be invoked in either mode. See [ADR — Function | Workflow as Sibling Peer Base Types](ADR/0001-cpt-cf-serverless-runtime-adr-callable-type-hierarchy.md) for the full rationale.
 
 Functions and workflows share the same definition schema and the same implementation language constructs. The distinguishing characteristics of a workflow are:
 
@@ -984,17 +1813,17 @@ A function that does not declare `workflow_traits` has none of these capabilitie
 1. **Execute without durable overhead** — if the workflow can complete within the sync timeout without requiring suspension or event waiting, the runtime executes it as a plain function call. Checkpointing is skipped (not silently — the invocation record explicitly notes `mode: sync`), and the result is returned directly. This is appropriate for short-lived workflows where durability adds cost without value.
 2. **Reject the request** — if the workflow requires capabilities that are incompatible with synchronous execution (suspension, event waiting, long-running steps that exceed the sync timeout), the runtime MUST return an explicit error directing the client to use asynchronous invocation. The runtime MUST NOT silently degrade behavior.
 
-A workflow's `workflow_traits` SHOULD declare whether it is async-only. Workflows that require suspension or event waiting MUST be marked async-only and will be rejected on sync invocation. Workflows that do not require these capabilities may be invoked in either mode. If a workflow does not declare async-only but reaches a suspension point during synchronous execution, the runtime MUST fail the request with error type `gts.x.core.serverless.err.v1~x.core.serverless.err.sync_suspension.v1~` (409) rather than blocking indefinitely or silently dropping the suspension.
+A workflow's `workflow_traits` SHOULD declare whether it is async-only. Workflows that require suspension or event waiting MUST be marked async-only and will be rejected on sync invocation. Workflows that do not require these capabilities may be invoked in either mode. If a workflow does not declare async-only but reaches a suspension point during synchronous execution, the runtime MUST fail the request with error type `gts.x.core.sless.err.v1~x.core.sless.err.sync_suspension.v1~` (409) rather than blocking indefinitely or silently dropping the suspension.
 
 **Short-timeout guidance:** synchronous operations should have short timeouts. Clients requiring long-running or durable execution should use asynchronous invocation (jobs), which returns an invocation ID that can be used to poll status, receive callbacks, or reconnect to a resumed execution.
 
 ##### GTS Schema
 
-> Schema: [`gts.x.core.serverless.function.v1~x.core.serverless.workflow.v1~`](DESIGN_GTS_SCHEMAS.md#workflow)
+> Schema: [`gts.x.core.sless.workflow.v1~`](DESIGN_GTS_SCHEMAS.md#workflow)
 
 ##### Instance Example
 
-GTS Address: `gts.x.core.serverless.function.v1~x.core.serverless.workflow.v1~vendor.app.orders.process_order.v1~`
+GTS Address: `gts.x.core.sless.workflow.v1~vendor.app.orders.process_order.v1~`
 
 ```json
 {
@@ -1066,7 +1895,7 @@ GTS Address: `gts.x.core.serverless.function.v1~x.core.serverless.workflow.v1~ve
     },
     "workflow": {
       "compensation": {
-        "on_failure": "gts.x.core.serverless.function.v1~vendor.app.orders.rollback_order.v1~",
+        "on_failure": "gts.x.core.sless.function.v1~vendor.app.orders.rollback_order.v1~",
         "on_cancel": null
       },
       "checkpointing": {
@@ -1076,7 +1905,7 @@ GTS Address: `gts.x.core.serverless.function.v1~x.core.serverless.workflow.v1~ve
     }
   },
   "implementation": {
-    "adapter": "gts.x.core.serverless.adapter.starlark.v1~",
+    "adapter": "gts.x.core.sless.runtime.starlark.v1~",
     "kind": "code",
     "code": {
       "language": "starlark",
@@ -1090,7 +1919,7 @@ GTS Address: `gts.x.core.serverless.function.v1~x.core.serverless.workflow.v1~ve
 
 #### InvocationRecord
 
-**GTS ID:** `gts.x.core.serverless.invocation.v1~`
+**GTS ID:** `gts.x.core.sless.invocation.v1~`
 
 An invocation record tracks the lifecycle of a single function execution, including status, parameters,
 results, timing, and observability data. Per PRD BR-015, BR-021, and BR-034, invocations are queryable
@@ -1098,14 +1927,14 @@ with tenant and correlation identifiers for traceability.
 
 ##### GTS Schema
 
-> Schema: [`gts.x.core.serverless.invocation.v1~`](DESIGN_GTS_SCHEMAS.md#invocationrecord)
+> Schema: [`gts.x.core.sless.invocation.v1~`](DESIGN_GTS_SCHEMAS.md#invocationrecord)
 
 ##### Instance Example
 
 ```json
 {
   "invocation_id": "inv_abc",
-  "function_id": "gts.x.core.serverless.function.v1~vendor.app.namespace.calculate_tax.v1~",
+  "function_id": "gts.x.core.sless.function.v1~vendor.app.namespace.calculate_tax.v1~",
   "function_version": "1.0.0",
   "tenant_id": "t_123",
   "status": "running",
@@ -1140,14 +1969,14 @@ with tenant and correlation identifiers for traceability.
 
 #### Schedule
 
-**GTS ID:** `gts.x.core.serverless.schedule.v1~`
+**GTS ID:** `gts.x.core.sless.schedule.v1~`
 
 A schedule defines a recurring trigger for a function based on cron expressions or intervals.
 Per PRD BR-007 and BR-022, schedules support lifecycle management and configurable missed schedule policies.
 
 ##### GTS Schema
 
-> Schema: [`gts.x.core.serverless.schedule.v1~`](DESIGN_GTS_SCHEMAS.md#schedule)
+> Schema: [`gts.x.core.sless.schedule.v1~`](DESIGN_GTS_SCHEMAS.md#schedule)
 
 ##### Instance Example
 
@@ -1155,7 +1984,7 @@ Per PRD BR-007 and BR-022, schedules support lifecycle management and configurab
 {
   "schedule_id": "sch_001",
   "tenant_id": "t_123",
-  "function_id": "gts.x.core.serverless.function.v1~vendor.app.billing.calculate_tax.v1~",
+  "function_id": "gts.x.core.sless.function.v1~vendor.app.billing.calculate_tax.v1~",
   "name": "Daily Tax Calculation",
   "timezone": "UTC",
   "expression": {
@@ -1225,14 +2054,14 @@ When the scheduler is unavailable (maintenance, outage), schedules may be missed
 
 #### Trigger
 
-**GTS ID:** `gts.x.core.serverless.trigger.v1~`
+**GTS ID:** `gts.x.core.sless.trigger.v1~`
 
 A trigger binds an event type to a function, enabling event-driven invocation.
 Per PRD BR-007, triggers are one of three supported trigger mechanisms (schedule, API, event).
 
 ##### GTS Schema
 
-> Schema: [`gts.x.core.serverless.trigger.v1~`](DESIGN_GTS_SCHEMAS.md#trigger)
+> Schema: [`gts.x.core.sless.trigger.v1~`](DESIGN_GTS_SCHEMAS.md#trigger)
 
 ##### Instance Example
 
@@ -1242,7 +2071,7 @@ Per PRD BR-007, triggers are one of three supported trigger mechanisms (schedule
   "tenant_id": "t_123",
   "event_type_id": "gts.x.core.events.event.v1~vendor.app.orders.approved.v1~",
   "event_filter_query": "payload.order_id != null",
-  "function_id": "gts.x.core.serverless.function.v1~x.core.serverless.workflow.v1~vendor.app.orders.process_approval.v1~",
+  "function_id": "gts.x.core.sless.workflow.v1~vendor.app.orders.process_approval.v1~",
   "dead_letter_queue": {
     "enabled": true,
     "retry_policy": {
@@ -1329,13 +2158,13 @@ When an external dependency is disconnected:
 
 #### Webhook Trigger
 
-**GTS ID:** `gts.x.core.serverless.webhook_trigger.v1~`
+**GTS ID:** `gts.x.core.sless.webhook_trigger.v1~`
 
 Webhook triggers expose HTTP endpoints that external systems can call to trigger function executions.
 
 ##### Webhook Schema
 
-> Schema: [`gts.x.core.serverless.webhook_trigger.v1~`](DESIGN_GTS_SCHEMAS.md#webhook-trigger)
+> Schema: [`gts.x.core.sless.webhook_trigger.v1~`](DESIGN_GTS_SCHEMAS.md#webhook-trigger)
 
 ##### Webhook Authentication Types
 
@@ -1350,14 +2179,14 @@ Webhook triggers expose HTTP endpoints that external systems can call to trigger
 
 #### TenantRuntimePolicy
 
-**GTS ID:** `gts.x.core.serverless.tenant_policy.v1~`
+**GTS ID:** `gts.x.core.sless.tenant_policy.v1~`
 
 Tenant-level governance settings including quotas, retention policies, and defaults.
 Per PRD BR-020, BR-106, and BR-107, tenants are provisioned with isolation and governance settings.
 
 ##### GTS Schema
 
-> Schema: [`gts.x.core.serverless.tenant_policy.v1~`](DESIGN_GTS_SCHEMAS.md#tenantruntimepolicy)
+> Schema: [`gts.x.core.sless.tenant_policy.v1~`](DESIGN_GTS_SCHEMAS.md#tenantruntimepolicy)
 
 ##### Instance Example
 
@@ -1381,8 +2210,8 @@ Per PRD BR-020, BR-106, and BR-107, tenants are provisioned with isolation and g
   },
   "policies": {
     "allowed_runtimes": [
-      "gts.x.core.serverless.adapter.starlark.v1~",
-      "gts.x.core.serverless.adapter.temporal.v1~"
+      "gts.x.core.sless.runtime.starlark.v1~",
+      "gts.x.core.sless.runtime.temporal.v1~"
     ],
     "require_approval_for_publish": false,
     "allowed_outbound_domains": ["*.example.com", "api.stripe.com"]
@@ -1421,6 +2250,218 @@ See **[DESIGN_RUST_TYPES.md](./DESIGN_RUST_TYPES.md)** for the full Rust source.
 | `ServerlessRuntime` | trait | Abstract async interface for all runtime operations (register, invoke, schedule, trigger, policy) |
 | `RuntimeErrorPayload` | struct | Structured error with GTS error type ID, category, message, and details |
 
+### 3.1.1 Complete Entity Examples
+
+The following examples show fully-populated instances of the two primary callable entity types.
+
+#### Example 1 — Function: HTTP Fetch
+
+A simple stateless function that fetches a URL and returns the HTTP status and body excerpt.
+
+**GTS Address:** `gts.x.core.sless.function.v1~vendor.myapp.fetch.v1~`
+
+```json
+{
+  "id": "gts.x.core.sless.function.v1~vendor.myapp.fetch.v1~",
+  "name": "fetch",
+  "description": "Fetch a remote URL and return the HTTP status code and a body excerpt.",
+  "version": "1.0.0",
+  "tenant_id": "t_acme",
+  "owner": {
+    "owner_type": "tenant",
+    "id": "t_acme",
+    "tenant_id": "t_acme"
+  },
+  "status": "active",
+  "tags": ["http", "utility"],
+  "schema": {
+    "params": {
+      "type": "object",
+      "properties": {
+        "url": {
+          "type": "string",
+          "format": "uri",
+          "description": "The URL to fetch."
+        },
+        "timeout_ms": {
+          "type": "integer",
+          "default": 5000,
+          "description": "Request timeout in milliseconds."
+        }
+      },
+      "required": ["url"]
+    },
+    "returns": {
+      "type": "object",
+      "properties": {
+        "status": {
+          "type": "integer",
+          "description": "HTTP response status code."
+        },
+        "body_excerpt": {
+          "type": "string",
+          "description": "First 500 characters of the response body."
+        }
+      },
+      "required": ["status", "body_excerpt"]
+    },
+    "errors": [
+      "gts.x.core.sless.err.v1~x.core.sless.err.validation.v1~"
+    ]
+  },
+  "traits": {
+    "invocation": {
+      "supported": ["sync", "async"],
+      "default": "sync"
+    },
+    "is_idempotent": true,
+    "caching": {
+      "max_age_seconds": 60
+    },
+    "limits": {
+      "timeout_seconds": 10,
+      "memory_mb": 64,
+      "cpu": 0.1,
+      "max_concurrent": 200
+    },
+    "retry": {
+      "max_attempts": 3,
+      "initial_delay_ms": 500,
+      "max_delay_ms": 5000,
+      "backoff_multiplier": 2.0,
+      "non_retryable_errors": []
+    },
+    "rate_limit": {
+      "strategy": "gts.x.core.sless.rate_limit.v1~x.core.sless.rate_limit.token_bucket.v1~",
+      "config": {
+        "max_requests_per_second": 100,
+        "max_requests_per_minute": 3000,
+        "burst_size": 30
+      }
+    }
+  },
+  "implementation": {
+    "adapter": "gts.x.core.sless.runtime.starlark.v1~",
+    "kind": "code",
+    "code": {
+      "language": "starlark",
+      "source": "def main(ctx, input):\n  resp = http_get(input.url, timeout_ms=input.get('timeout_ms', 5000))\n  return {\"status\": resp.status_code, \"body_excerpt\": resp.text[:500]}\n"
+    }
+  },
+  "created_at": "2026-03-01T09:00:00.000Z",
+  "updated_at": "2026-03-01T09:00:00.000Z"
+}
+```
+
+#### Example 2 — Workflow: Order Processing
+
+A multi-step durable workflow that reserves inventory, charges payment, and creates a shipping label. Uses checkpointing, compensation, and async-only invocation.
+
+**GTS Address:** `gts.x.core.sless.workflow.v1~vendor.myapp.orders.process_order.v1~`
+
+```json
+{
+  "id": "gts.x.core.sless.workflow.v1~vendor.myapp.orders.process_order.v1~",
+  "name": "process_order",
+  "description": "Multi-step order processing: inventory reservation, payment charge, and shipping label creation with saga-style compensation on failure.",
+  "version": "1.0.0",
+  "tenant_id": "t_acme",
+  "owner": {
+    "owner_type": "tenant",
+    "id": "t_acme",
+    "tenant_id": "t_acme"
+  },
+  "status": "active",
+  "tags": ["orders", "fulfillment", "saga"],
+  "schema": {
+    "params": {
+      "type": "object",
+      "properties": {
+        "order_id": {
+          "type": "string",
+          "description": "Unique order identifier."
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "sku": {"type": "string"},
+              "qty": {"type": "integer", "minimum": 1}
+            },
+            "required": ["sku", "qty"]
+          }
+        },
+        "payment_token": {
+          "type": "string",
+          "description": "Tokenized payment method."
+        }
+      },
+      "required": ["order_id", "items", "payment_token"]
+    },
+    "returns": {
+      "type": "object",
+      "properties": {
+        "order_status": {
+          "type": "string",
+          "enum": ["fulfilled", "failed"]
+        },
+        "tracking_number": {
+          "type": "string",
+          "description": "Shipping carrier tracking number. Present when order_status is fulfilled."
+        }
+      },
+      "required": ["order_status"]
+    },
+    "errors": []
+  },
+  "traits": {
+    "invocation": {
+      "supported": ["async"],
+      "default": "async"
+    },
+    "is_idempotent": false,
+    "caching": {
+      "max_age_seconds": 0
+    },
+    "limits": {
+      "timeout_seconds": 300,
+      "memory_mb": 256,
+      "cpu": 0.5,
+      "max_concurrent": 50
+    },
+    "retry": {
+      "max_attempts": 5,
+      "initial_delay_ms": 1000,
+      "max_delay_ms": 30000,
+      "backoff_multiplier": 2.0,
+      "non_retryable_errors": []
+    },
+    "workflow": {
+      "async_only": true,
+      "checkpointing": {
+        "strategy": "automatic"
+      },
+      "compensation": {
+        "on_failure": "gts.x.core.sless.function.v1~vendor.myapp.orders.rollback_order.v1~",
+        "on_cancel": "gts.x.core.sless.function.v1~vendor.myapp.orders.rollback_order.v1~"
+      },
+      "max_suspension_days": 7
+    }
+  },
+  "implementation": {
+    "adapter": "gts.x.core.sless.runtime.starlark.v1~",
+    "kind": "code",
+    "code": {
+      "language": "starlark",
+      "source": "def main(ctx, input):\n  reservation = ctx.call('vendor.myapp.inventory.reserve', {'order_id': input.order_id, 'items': input.items})\n  charge = ctx.call('vendor.myapp.payments.charge', {'token': input.payment_token, 'reservation_id': reservation.id})\n  label = ctx.call('vendor.myapp.shipping.create_label', {'order_id': input.order_id, 'charge_id': charge.id})\n  return {'order_status': 'fulfilled', 'tracking_number': label.tracking_number}\n"
+    }
+  },
+  "created_at": "2026-03-01T09:00:00.000Z",
+  "updated_at": "2026-03-01T09:00:00.000Z"
+}
+```
+
 ### 3.2 Component Model
 
 The Serverless Runtime is composed of the following logical components. Each component has a defined responsibility scope and interacts with other components through the domain model types defined in section 3.1.
@@ -1453,7 +2494,7 @@ Manages the lifecycle of function definitions (functions and workflows), includi
 
 ##### Why this component exists
 
-Handles the invocation lifecycle: accepting invocation requests, dispatching to executors, managing status transitions, and returning results.
+Handles the invocation lifecycle: accepting invocation requests, forwarding to `sless-runtime` for execution, managing status transitions, and returning results.
 
 ##### Responsibility scope
 
@@ -1613,12 +2654,12 @@ Content-Type: `application/problem+json`
 
 ```json
 {
-  "type": "gts://gts.x.core.serverless.err.v1~x.core.serverless.err.validation.v1~",
+  "type": "gts://gts.x.core.sless.err.v1~x.core.sless.err.validation.v1~",
   "title": "Validation Error",
   "status": 422,
   "detail": "Input validation failed for field 'params.amount'",
   "instance": "/api/serverless-runtime/v1/invocations",
-  "code": "gts.x.core.serverless.err.v1~x.core.serverless.err.validation.v1~",
+  "code": "gts.x.core.sless.err.v1~x.core.sless.err.validation.v1~",
   "trace_id": "abc123",
   "errors": [
     {
@@ -1667,11 +2708,11 @@ Creates a new function in `draft` state.
 {
   "definition": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "$id": "gts://gts.x.core.serverless.function.v1~vendor.app.billing.calculate_tax.v1~",
-    "allOf": [{"$ref": "gts://gts.x.core.serverless.function.v1~"}],
+    "$id": "gts://gts.x.core.sless.function.v1~vendor.app.billing.calculate_tax.v1~",
+    "allOf": [{"$ref": "gts://gts.x.core.sless.function.v1~"}],
     "type": "object",
     "properties": {
-      "id": {"const": "gts.x.core.serverless.function.v1~vendor.app.billing.calculate_tax.v1~"},
+      "id": {"const": "gts.x.core.sless.function.v1~vendor.app.billing.calculate_tax.v1~"},
       "params": {"const": {"type": "object", "properties": {"invoice_total": {"type": "number"}, "region": {"type": "string"}}, "required": ["invoice_total", "region"]}},
       "returns": {"const": {"type": "object", "properties": {"tax": {"type": "number"}}, "required": ["tax"]}},
       "traits": {"type": "object", "properties": {"runtime": {"const": "starlark"}}},
@@ -1692,7 +2733,7 @@ Creates a new function in `draft` state.
 **Response:** `201 Created`
 ```json
 {
-  "function_id": "gts.x.core.serverless.function.v1~vendor.app.billing.calculate_tax.v1~",
+  "function_id": "gts.x.core.sless.function.v1~vendor.app.billing.calculate_tax.v1~",
   "status": "draft",
   "version": "v1",
   "scope": "tenant",
@@ -1721,7 +2762,7 @@ Creates a new function in `draft` state.
 {
   "error": "function_exists",
   "message": "A function with this ID already exists",
-  "function_id": "gts.x.core.serverless.function.v1~vendor.app.billing.calculate_tax.v1~"
+  "function_id": "gts.x.core.sless.function.v1~vendor.app.billing.calculate_tax.v1~"
 }
 ```
 
@@ -1736,7 +2777,7 @@ Validates a draft function without publishing. Performs JSON Schema validation, 
 **Response:** `200 OK`
 ```json
 {
-  "function_id": "gts.x.core.serverless.function.v1~vendor.app.billing.calculate_tax.v1~",
+  "function_id": "gts.x.core.sless.function.v1~vendor.app.billing.calculate_tax.v1~",
   "valid": true,
   "warnings": [],
   "info": {
@@ -1750,7 +2791,7 @@ Validates a draft function without publishing. Performs JSON Schema validation, 
 `200 OK` -- Validation failed (not an HTTP error)
 ```json
 {
-  "function_id": "gts.x.core.serverless.function.v1~vendor.app.billing.calculate_tax.v1~",
+  "function_id": "gts.x.core.sless.function.v1~vendor.app.billing.calculate_tax.v1~",
   "valid": false,
   "errors": [
     {"code": "SYNTAX_ERROR", "message": "Starlark syntax error: unexpected token", "location": {"line": 5, "column": 12}, "source_snippet": "  return {\"tax\": input.invoice_total * }"},
@@ -1776,7 +2817,7 @@ Validates and transitions a draft function to `active` state.
 **Response:** `200 OK`
 ```json
 {
-  "function_id": "gts.x.core.serverless.function.v1~vendor.app.billing.calculate_tax.v1~",
+  "function_id": "gts.x.core.sless.function.v1~vendor.app.billing.calculate_tax.v1~",
   "status": "active",
   "version": "v1",
   "published_at": "2026-01-27T10:05:00.000Z",
@@ -1808,8 +2849,8 @@ Creates a new version of an existing function. The new version starts in `draft`
 **Response:** `201 Created`
 ```json
 {
-  "function_id": "gts.x.core.serverless.function.v1~vendor.app.billing.calculate_tax.v1.1~",
-  "previous_version": "gts.x.core.serverless.function.v1~vendor.app.billing.calculate_tax.v1~",
+  "function_id": "gts.x.core.sless.function.v1~vendor.app.billing.calculate_tax.v1.1~",
+  "previous_version": "gts.x.core.sless.function.v1~vendor.app.billing.calculate_tax.v1~",
   "status": "draft",
   "version": "v1.1",
   "version_bump": "minor",
@@ -1833,7 +2874,7 @@ Creates a new version of an existing function. The new version starts in `draft`
 **Response:** `200 OK`
 ```json
 {
-  "function_id": "gts.x.core.serverless.function.v1~vendor.app.billing.calculate_tax.v1~",
+  "function_id": "gts.x.core.sless.function.v1~vendor.app.billing.calculate_tax.v1~",
   "status": "active",
   "version": "v1",
   "scope": "tenant",
@@ -1875,7 +2916,7 @@ Creates a new version of an existing function. The new version starts in `draft`
 {
   "items": [
     {
-      "function_id": "gts.x.core.serverless.function.v1~vendor.app.billing.calculate_tax.v1~",
+      "function_id": "gts.x.core.sless.function.v1~vendor.app.billing.calculate_tax.v1~",
       "title": "Calculate Tax",
       "status": "active",
       "version": "v1",
@@ -1902,11 +2943,11 @@ Lists all versions of a function.
 **Response:** `200 OK`
 ```json
 {
-  "function_id": "gts.x.core.serverless.function.v1~vendor.app.billing.calculate_tax",
+  "function_id": "gts.x.core.sless.function.v1~vendor.app.billing.calculate_tax",
   "versions": [
-    {"version": "v1", "full_id": "gts.x.core.serverless.function.v1~vendor.app.billing.calculate_tax.v1~", "status": "deprecated", "published_at": "2026-01-01T10:00:00.000Z"},
-    {"version": "v2", "full_id": "gts.x.core.serverless.function.v1~vendor.app.billing.calculate_tax.v2~", "status": "active", "published_at": "2026-01-15T10:00:00.000Z"},
-    {"version": "v2.1", "full_id": "gts.x.core.serverless.function.v1~vendor.app.billing.calculate_tax.v2.1~", "status": "draft", "created_at": "2026-01-27T10:00:00.000Z"}
+    {"version": "v1", "full_id": "gts.x.core.sless.function.v1~vendor.app.billing.calculate_tax.v1~", "status": "deprecated", "published_at": "2026-01-01T10:00:00.000Z"},
+    {"version": "v2", "full_id": "gts.x.core.sless.function.v1~vendor.app.billing.calculate_tax.v2~", "status": "active", "published_at": "2026-01-15T10:00:00.000Z"},
+    {"version": "v2.1", "full_id": "gts.x.core.sless.function.v1~vendor.app.billing.calculate_tax.v2.1~", "status": "draft", "created_at": "2026-01-27T10:00:00.000Z"}
   ]
 }
 ```
@@ -1921,7 +2962,7 @@ Lists all versions of a function.
 **Response:** `200 OK`
 ```json
 {
-  "function_id": "gts.x.core.serverless.function.v1~vendor.app.billing.calculate_tax.v1~",
+  "function_id": "gts.x.core.sless.function.v1~vendor.app.billing.calculate_tax.v1~",
   "status": "disabled",
   "disabled_at": "2026-01-27T12:00:00.000Z",
   "disabled_by": "user_123"
@@ -1938,7 +2979,7 @@ Lists all versions of a function.
 ```json
 {
   "reason": "Replaced by v2 with improved tax calculation",
-  "successor_id": "gts.x.core.serverless.function.v1~vendor.app.billing.calculate_tax.v2~",
+  "successor_id": "gts.x.core.sless.function.v1~vendor.app.billing.calculate_tax.v2~",
   "sunset_date": "2026-03-01T00:00:00.000Z"
 }
 ```
@@ -1946,12 +2987,12 @@ Lists all versions of a function.
 **Response:** `200 OK`
 ```json
 {
-  "function_id": "gts.x.core.serverless.function.v1~vendor.app.billing.calculate_tax.v1~",
+  "function_id": "gts.x.core.sless.function.v1~vendor.app.billing.calculate_tax.v1~",
   "status": "deprecated",
   "deprecated_at": "2026-01-27T12:00:00.000Z",
   "deprecation": {
     "reason": "Replaced by v2 with improved tax calculation",
-    "successor_id": "gts.x.core.serverless.function.v1~vendor.app.billing.calculate_tax.v2~",
+    "successor_id": "gts.x.core.sless.function.v1~vendor.app.billing.calculate_tax.v2~",
     "sunset_date": "2026-03-01T00:00:00.000Z"
   }
 }
@@ -1974,7 +3015,7 @@ Soft-deletes a function. Retained for audit purposes.
 **Response:** `200 OK`
 ```json
 {
-  "function_id": "gts.x.core.serverless.function.v1~vendor.app.billing.calculate_tax.v1~",
+  "function_id": "gts.x.core.sless.function.v1~vendor.app.billing.calculate_tax.v1~",
   "status": "deleted",
   "deleted_at": "2026-01-27T12:00:00.000Z",
   "deleted_by": "user_123",
@@ -2001,11 +3042,12 @@ Soft-deletes a function. Retained for audit purposes.
 | `POST` | `/api/serverless-runtime/v1/invocations` | Start invocation |
 | `GET` | `/api/serverless-runtime/v1/invocations` | List invocations |
 | `GET` | `/api/serverless-runtime/v1/invocations/{invocation_id}` | Get status |
-| `POST` | `/api/serverless-runtime/v1/invocations/{invocation_id}:control` | Control invocation lifecycle |
+| `POST` | `/api/serverless-runtime/v1/invocations/{invocation_id}:control` | Control invocation lifecycle (generic) |
+| `POST` | `/api/serverless-runtime/v1/invocations/{invocation_id}:adapter-control` | Adapter-specific control actions (passthrough) |
 
-##### Invocation Control Actions
+##### Invocation Control Actions (Generic)
 
-The `:control` endpoint accepts a JSON body with `action` field:
+The `:control` endpoint handles **platform-level lifecycle actions** that work across all adapters. The orchestrator executes these directly — they never reach the adapter.
 
 ```json
 {
@@ -2023,11 +3065,59 @@ Valid actions and state requirements:
 | `retry` | Retry a failed invocation with same parameters | `failed` |
 | `replay` | Create new invocation from completed one's params | `succeeded`, `failed` |
 
+##### Adapter Control Actions (Passthrough)
+
+The `:adapter-control` endpoint handles **runtime-specific actions** that are defined and implemented by individual adapters. The orchestrator acts as a secure proxy:
+
+1. Authenticates the caller and verifies tenant ownership of the invocation
+2. Looks up which adapter is executing this invocation
+3. Validates the action is in the adapter's declared `control_actions` capability set
+4. Forwards the action and payload to the adapter via the `RuntimeAdapter` trait
+5. Returns the adapter's response to the caller
+
+```json
+{
+  "action": "signal",
+  "payload": {
+    "signal_name": "approval_received",
+    "data": { "approved_by": "user_42", "amount": 5000 }
+  }
+}
+```
+
+**Response:** The adapter returns an opaque JSON result. The orchestrator wraps it in a standard envelope:
+
+```json
+{
+  "invocation_id": "inv_abc123",
+  "adapter": "gts.x.core.sless.runtime.temporal.v1~",
+  "action": "signal",
+  "result": { "delivered": true }
+}
+```
+
+**Action discovery:** Clients discover available adapter actions via `GET /invocations/{id}` — the response includes an `adapter_capabilities.control_actions` array listing the actions the adapter supports for this invocation. This is populated from the adapter's `AdapterCapabilities` declaration.
+
+**Example adapter actions by runtime:**
+
+| Adapter | Action | Payload | Description |
+|---|---|---|---|
+| Temporal | `signal` | `{ "signal_name": "...", "data": {...} }` | Send a Temporal signal to a running workflow |
+| Temporal | `query` | `{ "query_type": "...", "args": {...} }` | Query workflow state without side effects |
+| Temporal | `reset` | `{ "event_id": 42 }` | Reset workflow to a specific event in history |
+| Serverless Workflow | `send-event` | `{ "event_type": "...", "data": {...} }` | Deliver an event to a workflow in an event-waiting state |
+| Serverless Workflow | `get-state` | `{}` | Return current state machine position and data |
+| Starlark | _(none)_ | — | Simple executor, no adapter-specific actions |
+
+**Error handling:** If the adapter does not support the requested action, the orchestrator returns `422 Unprocessable Entity` with error type `gts.x.core.sless.err.v1~x.core.sless.err.unsupported_action.v1~` without forwarding to the adapter. If the adapter returns an error, the orchestrator wraps it in an RFC 9457 Problem response with the adapter's error detail preserved.
+
+See [The Adapter Contract (section 2.3)](#the-adapter-contract) for the full `RuntimeAdapter` trait, `ExecutionContext` host callbacks, `AdapterCapabilities`, and `ControlActionSpec` definitions.
+
 ##### Start Invocation Request
 
 ```json
 {
-  "function_id": "gts.x.core.serverless.function.v1~...",
+  "function_id": "gts.x.core.sless.function.v1~...",
   "mode": "async",
   "params": {
     "invoice_id": "inv_001",
@@ -2051,10 +3141,10 @@ a synthetic `InvocationResult` without producing any durable state or side effec
 The following checks run in order; the first failure short-circuits and returns an
 RFC 9457 Problem Details response (`application/problem+json`):
 
-1. **Function exists** -- resolve `function_id` to an `FunctionDefinition`. Return `404 Not Found` with error type `gts.x.core.serverless.err.v1~x.core.serverless.err.not_found.v1~` if missing.
-2. **Function is callable** -- verify `status` is `active` or `deprecated`. Return `409 Conflict` with error type `gts.x.core.serverless.err.v1~x.core.serverless.err.not_active.v1~` if the function is in `draft`, `disabled`, or `archived` state.
-3. **Input params match schema** -- validate `params` against `function.schema.params` JSON Schema. Return `422 Unprocessable Entity` with error type `gts.x.core.serverless.err.v1~x.core.serverless.err.validation.v1~` and per-field `errors` array on mismatch.
-4. **Tenant quota** -- verify the tenant has not exhausted `max_concurrent_executions` from `TenantQuotas`. Return `429 Too Many Requests` with error type `gts.x.core.serverless.err.v1~x.core.serverless.err.quota_exceeded.v1~` if at capacity.
+1. **Function exists** -- resolve `function_id` to an `FunctionDefinition`. Return `404 Not Found` with error type `gts.x.core.sless.err.v1~x.core.sless.err.not_found.v1~` if missing.
+2. **Function is callable** -- verify `status` is `active` or `deprecated`. Return `409 Conflict` with error type `gts.x.core.sless.err.v1~x.core.sless.err.not_active.v1~` if the function is in `draft`, `disabled`, or `archived` state.
+3. **Input params match schema** -- validate `params` against `function.schema.params` JSON Schema. Return `422 Unprocessable Entity` with error type `gts.x.core.sless.err.v1~x.core.sless.err.validation.v1~` and per-field `errors` array on mismatch.
+4. **Tenant quota** -- verify the tenant has not exhausted `max_concurrent_executions` from `TenantQuotas`. Return `429 Too Many Requests` with error type `gts.x.core.sless.err.v1~x.core.sless.err.quota_exceeded.v1~` if at capacity.
 
 **What Dry-Run Does NOT Do**
 
@@ -2095,7 +3185,7 @@ Validation failures return an RFC 9457 Problem Details body (`application/proble
 {
   "record": {
     "invocation_id": "dryrun_a1b2c3d4-e5f6-7890-abcd-ef1234567890",
-    "function_id": "gts.x.core.serverless.function.v1~vendor.app.namespace.calculate_tax.v1~",
+    "function_id": "gts.x.core.sless.function.v1~vendor.app.namespace.calculate_tax.v1~",
     "function_version": "1.0.0",
     "tenant_id": "t_123",
     "status": "queued",
@@ -2221,7 +3311,7 @@ There is no explicit cache purge API. Authors who need to force re-execution sho
 ```json
 {
   "schedule_id": "daily-tax-report",
-  "function_id": "gts.x.core.serverless.function.v1~vendor.app.billing.generate_tax_report.v1~",
+  "function_id": "gts.x.core.sless.function.v1~vendor.app.billing.generate_tax_report.v1~",
   "expression": {"kind": "cron", "value": "0 2 * * *"},
   "timezone": "America/Los_Angeles",
   "input_overrides": {"report_type": "daily", "format": "pdf"},
@@ -2238,7 +3328,7 @@ There is no explicit cache purge API. Authors who need to force re-execution sho
 {
   "schedule_id": "daily-tax-report",
   "tenant_id": "tenant_abc",
-  "function_id": "gts.x.core.serverless.function.v1~vendor.app.billing.generate_tax_report.v1~",
+  "function_id": "gts.x.core.sless.function.v1~vendor.app.billing.generate_tax_report.v1~",
   "expression": {"kind": "cron", "value": "0 2 * * *"},
   "timezone": "America/Los_Angeles",
   "enabled": true,
@@ -2272,7 +3362,7 @@ There is no explicit cache purge API. Authors who need to force re-execution sho
 {
   "schedule_id": "daily-tax-report",
   "tenant_id": "tenant_abc",
-  "function_id": "gts.x.core.serverless.function.v1~vendor.app.billing.generate_tax_report.v1~",
+  "function_id": "gts.x.core.sless.function.v1~vendor.app.billing.generate_tax_report.v1~",
   "expression": {"kind": "cron", "value": "0 2 * * *"},
   "timezone": "America/Los_Angeles",
   "input_overrides": {"report_type": "daily", "format": "pdf"},
@@ -2386,7 +3476,7 @@ Sets `enabled: false`. No new executions will be triggered until resumed.
   "runs": [
     {"run_id": "run_001", "scheduled_at": "2026-01-27T10:00:00.000Z", "status": "succeeded", "job_id": "job_abc123", "started_at": "2026-01-27T10:00:01.000Z", "completed_at": "2026-01-27T10:00:15.000Z", "duration_ms": 14000},
     {"run_id": "run_002", "scheduled_at": "2026-01-26T10:00:00.000Z", "status": "skipped", "skip_reason": "concurrency_policy_forbid"},
-    {"run_id": "run_003", "scheduled_at": "2026-01-25T10:00:00.000Z", "status": "failed", "job_id": "job_def456", "error": {"id": "gts.x.core.serverless.err.v1~x.core.serverless.err.runtime_timeout.v1~", "message": "Execution timed out"}}
+    {"run_id": "run_003", "scheduled_at": "2026-01-25T10:00:00.000Z", "status": "failed", "job_id": "job_def456", "error": {"id": "gts.x.core.sless.err.v1~x.core.sless.err.runtime_timeout.v1~", "message": "Execution timed out"}}
   ],
   "next_runs": [{"scheduled_at": "2026-01-28T10:00:00.000Z"}, {"scheduled_at": "2026-01-29T10:00:00.000Z"}],
   "page_info": {"next_cursor": "<opaque>", "limit": 25}
@@ -2423,7 +3513,7 @@ Manually triggers an immediate execution independent of the cron schedule.
 ```json
 {
   "trigger_id": "order-placed-handler",
-  "function_id": "gts.x.core.serverless.function.v1~vendor.app.orders.process_order.v1~",
+  "function_id": "gts.x.core.sless.function.v1~vendor.app.orders.process_order.v1~",
   "event_type_id": "gts.x.core.events.event.v1~vendor.app.commerce.order_placed.v1~",
   "event_filter_query": "payload.total > 100",
   "execution_context": "system",
@@ -2437,7 +3527,7 @@ Manually triggers an immediate execution independent of the cron schedule.
 {
   "trigger_id": "order-placed-handler",
   "tenant_id": "tenant_abc",
-  "function_id": "gts.x.core.serverless.function.v1~vendor.app.orders.process_order.v1~",
+  "function_id": "gts.x.core.sless.function.v1~vendor.app.orders.process_order.v1~",
   "event_type_id": "gts.x.core.events.event.v1~vendor.app.commerce.order_placed.v1~",
   "event_filter_query": "payload.total > 100",
   "enabled": true,
@@ -2512,7 +3602,7 @@ Manually triggers an immediate execution independent of the cron schedule.
 ```json
 {
   "trigger_id": "github-push-handler",
-  "function_id": "gts.x.core.serverless.function.v1~vendor.app.ci.handle_push.v1~",
+  "function_id": "gts.x.core.sless.function.v1~vendor.app.ci.handle_push.v1~",
   "authentication": {"type": "hmac_sha256", "secret_ref": "github_webhook_secret"},
   "allowed_sources": ["192.30.252.0/22", "185.199.108.0/22"],
   "enabled": true
@@ -2712,7 +3802,7 @@ Response:
 ```json
 {
   "invocation_id": "<opaque-id>",
-  "function_id": "gts.x.core.serverless.function.v1~vendor.app.namespace.func_name.v1~",
+  "function_id": "gts.x.core.sless.function.v1~vendor.app.namespace.func_name.v1~",
   "status": "running",
   "timestamps": {
     "created_at": "2026-01-01T00:00:00.000Z",
@@ -2761,12 +3851,12 @@ Response:
 ```json
 {
   "invocation_id": "<opaque-id>",
-  "function_id": "gts.x.core.serverless.function.v1~...",
+  "function_id": "gts.x.core.sless.function.v1~...",
   "calls": {
     "items": [
       {
         "call_invocation_id": "<opaque-id>",
-        "function_id": "gts.x.core.serverless.function.v1~vendor.app.crm.lookup_customer.v1~",
+        "function_id": "gts.x.core.sless.function.v1~vendor.app.crm.lookup_customer.v1~",
         "params": {"customer_id": "c_123"},
         "duration_ms": 42,
         "response": {
@@ -2818,8 +3908,8 @@ The invocation flow follows the state machine defined in the InvocationStatus se
 3. If `dry_run: true`, return synthetic result without persisting
 4. If response caching is active and cache hit, return cached result
 5. Create `InvocationRecord` in `queued` status
-6. For `sync` mode: dispatch to executor, wait for result, return in response
-7. For `async` mode: return `invocation_id` immediately, dispatch to executor asynchronously
+6. For `sync` mode: forward to `sless-runtime`, wait for result, return in response
+7. For `async` mode: return `invocation_id` immediately, forward to `sless-runtime` asynchronously
 8. Executor runs function code, reports status transitions
 9. On success: transition to `succeeded`, populate result
 10. On failure: evaluate retry policy, retry or transition to `failed`
@@ -2911,32 +4001,32 @@ All registry and trigger operations emit audit events for traceability and compl
 
 | Event Type | Description |
 |------------|-------------|
-| `gts.x.core.serverless.audit.v1~x.core.registry.definition_created.v1~` | Function created |
-| `gts.x.core.serverless.audit.v1~x.core.registry.definition_published.v1~` | Function published |
-| `gts.x.core.serverless.audit.v1~x.core.registry.definition_updated.v1~` | Function updated |
-| `gts.x.core.serverless.audit.v1~x.core.registry.definition_disabled.v1~` | Function disabled |
-| `gts.x.core.serverless.audit.v1~x.core.registry.definition_enabled.v1~` | Function enabled |
-| `gts.x.core.serverless.audit.v1~x.core.registry.definition_deprecated.v1~` | Function deprecated |
-| `gts.x.core.serverless.audit.v1~x.core.registry.definition_deleted.v1~` | Function deleted |
-| `gts.x.core.serverless.audit.v1~x.core.registry.tenant_enabled.v1~` | Tenant enabled for serverless runtime |
-| `gts.x.core.serverless.audit.v1~x.core.registry.tenant_disabled.v1~` | Tenant disabled |
+| `gts.x.core.sless.audit.v1~x.core.registry.definition_created.v1~` | Function created |
+| `gts.x.core.sless.audit.v1~x.core.registry.definition_published.v1~` | Function published |
+| `gts.x.core.sless.audit.v1~x.core.registry.definition_updated.v1~` | Function updated |
+| `gts.x.core.sless.audit.v1~x.core.registry.definition_disabled.v1~` | Function disabled |
+| `gts.x.core.sless.audit.v1~x.core.registry.definition_enabled.v1~` | Function enabled |
+| `gts.x.core.sless.audit.v1~x.core.registry.definition_deprecated.v1~` | Function deprecated |
+| `gts.x.core.sless.audit.v1~x.core.registry.definition_deleted.v1~` | Function deleted |
+| `gts.x.core.sless.audit.v1~x.core.registry.tenant_enabled.v1~` | Tenant enabled for serverless runtime |
+| `gts.x.core.sless.audit.v1~x.core.registry.tenant_disabled.v1~` | Tenant disabled |
 
 #### Trigger Audit Events
 
 | Event Type | Description |
 |------------|-------------|
-| `gts.x.core.serverless.audit.v1~x.core.triggers.schedule_created.v1~` | Schedule created |
-| `gts.x.core.serverless.audit.v1~x.core.triggers.schedule_updated.v1~` | Schedule updated |
-| `gts.x.core.serverless.audit.v1~x.core.triggers.schedule_paused.v1~` | Schedule paused |
-| `gts.x.core.serverless.audit.v1~x.core.triggers.schedule_resumed.v1~` | Schedule resumed |
-| `gts.x.core.serverless.audit.v1~x.core.triggers.schedule_deleted.v1~` | Schedule deleted |
-| `gts.x.core.serverless.audit.v1~x.core.triggers.schedule_triggered.v1~` | Schedule manually triggered |
-| `gts.x.core.serverless.audit.v1~x.core.triggers.event_trigger_created.v1~` | Event trigger created |
-| `gts.x.core.serverless.audit.v1~x.core.triggers.event_trigger_updated.v1~` | Event trigger updated |
-| `gts.x.core.serverless.audit.v1~x.core.triggers.event_trigger_deleted.v1~` | Event trigger deleted |
-| `gts.x.core.serverless.audit.v1~x.core.triggers.webhook_created.v1~` | Webhook trigger created |
-| `gts.x.core.serverless.audit.v1~x.core.triggers.webhook_deleted.v1~` | Webhook trigger deleted |
-| `gts.x.core.serverless.audit.v1~x.core.triggers.webhook_secret_regenerated.v1~` | Webhook secret regenerated |
+| `gts.x.core.sless.audit.v1~x.core.triggers.schedule_created.v1~` | Schedule created |
+| `gts.x.core.sless.audit.v1~x.core.triggers.schedule_updated.v1~` | Schedule updated |
+| `gts.x.core.sless.audit.v1~x.core.triggers.schedule_paused.v1~` | Schedule paused |
+| `gts.x.core.sless.audit.v1~x.core.triggers.schedule_resumed.v1~` | Schedule resumed |
+| `gts.x.core.sless.audit.v1~x.core.triggers.schedule_deleted.v1~` | Schedule deleted |
+| `gts.x.core.sless.audit.v1~x.core.triggers.schedule_triggered.v1~` | Schedule manually triggered |
+| `gts.x.core.sless.audit.v1~x.core.triggers.event_trigger_created.v1~` | Event trigger created |
+| `gts.x.core.sless.audit.v1~x.core.triggers.event_trigger_updated.v1~` | Event trigger updated |
+| `gts.x.core.sless.audit.v1~x.core.triggers.event_trigger_deleted.v1~` | Event trigger deleted |
+| `gts.x.core.sless.audit.v1~x.core.triggers.webhook_created.v1~` | Webhook trigger created |
+| `gts.x.core.sless.audit.v1~x.core.triggers.webhook_deleted.v1~` | Webhook trigger deleted |
+| `gts.x.core.sless.audit.v1~x.core.triggers.webhook_secret_regenerated.v1~` | Webhook secret regenerated |
 
 #### Common Audit Event Envelope
 
@@ -2999,7 +4089,7 @@ Notes:
 
 | Capability | Hyperspot Serverless Runtime | AWS | Google Cloud | Azure |
 |---|---|---|---|---|
-| Standard error envelope | Base error type `gts.x.core.serverless.err.v1~` with `message`, `category`, `details` | Service-specific error payloads (varies) | Service-specific error payloads (varies) | Service-specific error payloads (varies) |
+| Standard error envelope | Base error type `gts.x.core.sless.err.v1~` with `message`, `category`, `details` | Service-specific error payloads (varies) | Service-specific error payloads (varies) | Service-specific error payloads (varies) |
 | Structured error classes | Derived errors: upstream HTTP, runtime limits/timeouts, code errors, validation | Often string-based error+cause (Step Functions) and runtime-specific error types/statuses | Runtime-specific error types/statuses | Runtime-specific error types/statuses |
 
 #### Category: Caching and Client Behavior

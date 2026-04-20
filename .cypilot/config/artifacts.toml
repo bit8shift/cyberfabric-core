@@ -77,9 +77,14 @@ patterns = ["modules/types-registry/*"]
 reason = "Ignore module 'file-parser' (not SDLC-documented yet: missing required PRD/DESIGN)."
 patterns = ["modules/file-parser/*"]
 
+
 [[ignore]]
-reason = "Ignore module 'serverless-runtime' (not SDLC-documented yet: missing required PRD/DESIGN and ID prefix alignment)."
-patterns = ["modules/serverless-runtime/*"]
+reason = "Ignore serverless-runtime companion docs — supplementary to DESIGN.md, not standalone SDLC artifacts."
+patterns = [
+  "modules/serverless-runtime/docs/DESIGN_GTS_SCHEMAS.md",
+  "modules/serverless-runtime/docs/DESIGN_RUST_TYPES.md",
+  "modules/serverless-runtime/docs/NEXT_ADR_SCOPE.md",
+]
 
 [[ignore]]
 reason = "Ignore module 'mini-chat' docs (temporary: PRD/DESIGN constraints failing in CI)."
