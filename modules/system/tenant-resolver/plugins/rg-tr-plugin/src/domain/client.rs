@@ -2,8 +2,6 @@
 //!
 //! Implements `TenantResolverPluginClient` using the domain service.
 
-use std::collections::HashSet;
-
 use async_trait::async_trait;
 use modkit_security::SecurityContext;
 use tenant_resolver_sdk::{
@@ -58,25 +56,20 @@ impl TenantResolverPluginClient for Service {
         ids: &[TenantId],
         options: &GetTenantsOptions,
     ) -> Result<Vec<TenantInfo>, TenantResolverError> {
-        let mut result = Vec::new();
-        let mut seen = HashSet::new();
+        // Single-round-trip batch read via RG `list_groups` with an OData
+        // `id in (...)` filter. The service layer handles input de-dup,
+        // pagination draining, and `ResourceGroup → TenantInfo` mapping.
+        // `list_groups` omits not-found IDs from the response, matching the
+        // SDK contract that missing IDs are silently skipped. Status
+        // filtering is applied here because tenant status lives inside the
+        // JSON `metadata` blob of the RG row and is not pushable into the
+        // OData `$filter`.
+        let tenants = self.resolve_tenants_batch(ctx, ids).await?;
 
-        for id in ids {
-            if !seen.insert(id) {
-                continue; // Skip duplicate IDs
-            }
-            match self.resolve_tenant(ctx, *id).await {
-                Ok(tenant) if matches_status(&tenant, &options.status) => {
-                    result.push(tenant);
-                }
-                Ok(_) | Err(TenantResolverError::TenantNotFound { .. }) => {
-                    // Doesn't match status filter or not found — silently skip
-                }
-                Err(e) => return Err(e),
-            }
-        }
-
-        Ok(result)
+        Ok(tenants
+            .into_iter()
+            .filter(|tenant| matches_status(tenant, &options.status))
+            .collect())
     }
 
     async fn get_ancestors(

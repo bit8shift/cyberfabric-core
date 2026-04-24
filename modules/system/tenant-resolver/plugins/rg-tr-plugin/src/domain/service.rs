@@ -15,8 +15,8 @@ use modkit_security::SecurityContext;
 use resource_group_sdk::TENANT_RG_TYPE_PATH;
 use resource_group_sdk::api::ResourceGroupReadHierarchy;
 use resource_group_sdk::error::ResourceGroupError;
-use resource_group_sdk::models::ResourceGroupWithDepth;
-use resource_group_sdk::odata::HierarchyFilterField;
+use resource_group_sdk::models::{ResourceGroup, ResourceGroupWithDepth};
+use resource_group_sdk::odata::{GroupFilterField, HierarchyFilterField};
 use tenant_resolver_sdk::{
     BarrierMode, TenantId, TenantInfo, TenantRef, TenantResolverError, TenantStatus,
 };
@@ -41,6 +41,19 @@ fn tenant_type_filter() -> Expr {
     hierarchy_eq(
         HierarchyFilterField::Type,
         Value::String(TENANT_RG_TYPE_PATH.to_owned()),
+    )
+}
+
+/// `type eq '<TENANT_RG_TYPE_PATH>'` expressed via the groups-filter field
+/// enum. Both `HierarchyFilterField::Type` and `GroupFilterField::Type`
+/// resolve to the public name `"type"`; this variant is used with
+/// `list_groups` (the flat listing endpoint) where `GroupFilterField` is
+/// the correct type-safe source of identifiers.
+fn tenant_type_filter_for_groups() -> Expr {
+    Expr::Compare(
+        Box::new(Expr::Identifier(GroupFilterField::Type.name().to_owned())),
+        CompareOperator::Eq,
+        Box::new(Expr::Value(Value::String(TENANT_RG_TYPE_PATH.to_owned()))),
     )
 }
 
@@ -105,6 +118,60 @@ impl Service {
             .find(|g| g.hierarchy.depth == 0)
             .map(map_to_tenant_info)
             .ok_or(TenantResolverError::TenantNotFound { tenant_id: id })
+    }
+
+    /// Get multiple tenants by IDs in a single RG round-trip.
+    ///
+    /// Issues one `list_groups` call with an `OData` filter
+    /// `type eq '<TENANT_RG_TYPE_PATH>' and id in (id1, id2, …)`, then drains
+    /// pagination if the result spans multiple pages. This replaces the
+    /// previous per-id sequential hierarchy lookups used by
+    /// `TenantResolverPluginClient::get_tenants`.
+    ///
+    /// Contract (from `TenantResolverPluginClient::get_tenants`):
+    /// - IDs not present in RG are silently skipped — `list_groups` simply
+    ///   does not include them in the response.
+    /// - Duplicate IDs in `ids` are de-duplicated for efficiency; RG would
+    ///   only return one row per id anyway, but we avoid sending duplicate
+    ///   entries in the `OData` filter.
+    /// - Output order is not guaranteed (the contract on the SDK trait
+    ///   explicitly leaves ordering unspecified).
+    /// - Status filtering is the caller's responsibility — applied in
+    ///   `client.rs::get_tenants` against the returned `TenantInfo` list.
+    pub(super) async fn resolve_tenants_batch(
+        &self,
+        ctx: &SecurityContext,
+        ids: &[TenantId],
+    ) -> Result<Vec<TenantInfo>, TenantResolverError> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Deduplicate input IDs. `HashSet` preserves uniqueness; order of the
+        // resulting Vec is irrelevant for `id in (...)`.
+        let unique_ids: Vec<uuid::Uuid> = ids
+            .iter()
+            .map(|id| id.0)
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
+
+        let id_values: Vec<Expr> = unique_ids
+            .iter()
+            .map(|id| Expr::Value(Value::Uuid(*id)))
+            .collect();
+
+        let id_in_filter = Expr::In(
+            Box::new(Expr::Identifier(GroupFilterField::Id.name().to_owned())),
+            id_values,
+        );
+
+        let filter = tenant_type_filter_for_groups().and(id_in_filter);
+        let base_query = ODataQuery::default().with_filter(filter);
+
+        let items = self.drain_list_groups_pages(ctx, base_query).await?;
+
+        Ok(items.iter().map(map_group_to_tenant_info).collect())
     }
 
     /// Resolve ancestors of a tenant.
@@ -249,6 +316,41 @@ impl Service {
 
         Ok(all_items)
     }
+
+    /// Drain all pages from `list_groups` for the given query. Mirrors
+    /// `drain_hierarchy_pages` but for the flat listing endpoint — no
+    /// per-anchor `NotFound` mapping, since `list_groups` returns an empty
+    /// page (not `NotFound`) when the filter matches no rows.
+    async fn drain_list_groups_pages(
+        &self,
+        ctx: &SecurityContext,
+        base_query: ODataQuery,
+    ) -> Result<Vec<ResourceGroup>, TenantResolverError> {
+        let mut all_items = Vec::new();
+        let mut query = base_query;
+
+        loop {
+            let page = self
+                .rg
+                .list_groups(ctx, &query)
+                .await
+                .map_err(|e| TenantResolverError::Internal(e.to_string()))?;
+
+            all_items.extend(page.items);
+
+            match page.page_info.next_cursor {
+                Some(cursor_str) => {
+                    let cursor = modkit_odata::CursorV1::decode(&cursor_str).map_err(|e| {
+                        TenantResolverError::Internal(format!("Invalid cursor: {e}"))
+                    })?;
+                    query = query.with_cursor(cursor);
+                }
+                None => break,
+            }
+        }
+
+        Ok(all_items)
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -261,6 +363,20 @@ enum Direction {
 // -- Mapping helpers --
 
 fn map_to_tenant_info(group: &ResourceGroupWithDepth) -> TenantInfo {
+    TenantInfo {
+        id: TenantId(group.id),
+        name: group.name.clone(),
+        status: parse_status_from_metadata(group.metadata.as_ref()),
+        tenant_type: Some(group.code.clone()),
+        parent_id: group.hierarchy.parent_id.map(TenantId),
+        self_managed: parse_self_managed_from_metadata(group.metadata.as_ref()),
+    }
+}
+
+/// Same as `map_to_tenant_info` but sourced from a plain `ResourceGroup`
+/// (no depth context) returned by `list_groups`. Used by
+/// `resolve_tenants_batch`.
+fn map_group_to_tenant_info(group: &ResourceGroup) -> TenantInfo {
     TenantInfo {
         id: TenantId(group.id),
         name: group.name.clone(),
