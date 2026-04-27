@@ -57,6 +57,7 @@ allow = [
   "BSL-1.0",
   "ISC",
   "Unicode-3.0",
+  "Unicode-DFS-2016",
   "CDLA-Permissive-2.0",
   "MPL-2.0",
   "Zlib",
@@ -68,7 +69,16 @@ confidence-threshold = 0.8
 
 # Per-crate exceptions (license(s) allowed only for a specific crate/version)
 exceptions = [
-  # { name = "some-crate", version = "*", allow = ["Zlib"] },
+  # kreuzberg >=4.8.0 changed from MIT to Elastic License 2.0 (EL-2.0).
+  # EL-2.0 is not on the default allow-list but is acceptable here because:
+  #   1. kreuzberg is an in-process library dependency, not a hosted service we resell.
+  #   2. CyberFabric's document parsing is incidental to the platform's core value
+  #      proposition; it is NOT a product sold primarily as a document-parsing service
+  #      competing with kreuzberg.
+  #   3. The pin `=4.9.4` prevents silent upgrades; any future version bump must be
+  #      reviewed for license changes.
+  # Reviewer sign-off required before removing or modifying this exception.
+  { name = "kreuzberg", version = "=4.9.4", allow = ["Elastic-2.0"] },
 ]
 
 # Private workspace crates handling

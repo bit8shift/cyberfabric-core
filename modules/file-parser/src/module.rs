@@ -8,8 +8,7 @@ use tracing::{debug, info};
 use crate::config::FileParserConfig;
 use crate::domain::service::{FileParserService, ServiceConfig};
 use crate::infra::parsers::{
-    DocxParser, HtmlParser, ImageParser, PdfParser, PlainTextParser, PptxParser, StubParser,
-    XlsxParser,
+    DocxParser, ImageParser, KreuzbergParser, PlainTextParser, StubParser,
 };
 
 /// Main module struct for file parsing
@@ -45,11 +44,8 @@ impl Module for FileParserModule {
         // Build parser backends
         let parsers: Vec<Arc<dyn crate::domain::parser::FileParserBackend>> = vec![
             Arc::new(PlainTextParser::new()),
-            Arc::new(HtmlParser::new()),
-            Arc::new(PdfParser::new()),
+            Arc::new(KreuzbergParser::new()),
             Arc::new(DocxParser::new()),
-            Arc::new(XlsxParser::new()),
-            Arc::new(PptxParser::new()),
             Arc::new(ImageParser::new()),
             Arc::new(StubParser::new()),
         ];

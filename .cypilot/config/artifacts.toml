@@ -85,11 +85,6 @@ reason = "Ignore module 'types-registry' (not SDLC-documented yet: missing requi
 patterns = ["modules/types-registry/*"]
 
 [[ignore]]
-reason = "Ignore module 'file-parser' (not SDLC-documented yet: missing required PRD/DESIGN)."
-patterns = ["modules/file-parser/*"]
-
-
-[[ignore]]
 reason = "Ignore serverless-runtime companion docs — supplementary to DESIGN.md, not standalone SDLC artifacts."
 patterns = [
   "modules/serverless-runtime/docs/DESIGN_GTS_SCHEMAS.md",

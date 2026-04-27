@@ -5,7 +5,7 @@
 // of parsing features like merged cells and formulas.
 
 use file_parser::domain::parser::FileParserBackend;
-use file_parser::infra::parsers::xlsx_parser::XlsxParser;
+use file_parser::infra::parsers::kreuzberg_parser::KreuzbergParser;
 use std::path::PathBuf;
 
 /// Helper to get the path to test data files
@@ -21,18 +21,22 @@ fn get_test_file_path(filename: &str) -> PathBuf {
 
 #[tokio::test]
 async fn test_xlsx_parser_basic_info() {
-    let parser = XlsxParser::new();
+    let parser = KreuzbergParser::new();
 
-    assert_eq!(parser.id(), "xlsx");
-    assert_eq!(
-        parser.supported_extensions(),
-        &["xlsx", "xls", "xlsm", "xlsb"]
+    assert_eq!(parser.id(), "kreuzberg");
+    assert!(
+        parser.supported_extensions().contains(&"xlsx"),
+        "KreuzbergParser should support xlsx extension"
+    );
+    assert!(
+        parser.supported_extensions().contains(&"xls"),
+        "KreuzbergParser should support xls extension"
     );
 }
 
 #[tokio::test]
 async fn test_xlsx_parser_with_simple_file() {
-    let parser = XlsxParser::new();
+    let parser = KreuzbergParser::new();
     let test_file = get_test_file_path("simple_data.xlsx");
 
     if !test_file.exists() {
@@ -65,7 +69,7 @@ async fn test_xlsx_parser_with_simple_file() {
 
 #[tokio::test]
 async fn test_xlsx_parser_with_multisheet_file() {
-    let parser = XlsxParser::new();
+    let parser = KreuzbergParser::new();
     let test_file = get_test_file_path("multi_sheet.xlsx");
 
     if !test_file.exists() {
@@ -99,7 +103,7 @@ async fn test_xlsx_parser_with_multisheet_file() {
 
 #[tokio::test]
 async fn test_xlsx_parser_nonexistent_file() {
-    let parser = XlsxParser::new();
+    let parser = KreuzbergParser::new();
     let test_file = PathBuf::from("/nonexistent/path/to/file.xlsx");
 
     let result = parser.parse_local_path(&test_file).await;
@@ -109,7 +113,7 @@ async fn test_xlsx_parser_nonexistent_file() {
 
 #[tokio::test]
 async fn test_xlsx_parser_invalid_xlsx_bytes() {
-    let parser = XlsxParser::new();
+    let parser = KreuzbergParser::new();
     let invalid_bytes = bytes::Bytes::from_static(b"This is not a valid XLSX file content");
 
     let result = parser
@@ -121,7 +125,7 @@ async fn test_xlsx_parser_invalid_xlsx_bytes() {
 
 #[tokio::test]
 async fn test_xlsx_parser_parse_bytes() {
-    let parser = XlsxParser::new();
+    let parser = KreuzbergParser::new();
     let test_file = get_test_file_path("simple_data.xlsx");
 
     if !test_file.exists() {
@@ -148,7 +152,7 @@ async fn test_xlsx_parser_parse_bytes() {
 
 #[tokio::test]
 async fn test_xlsx_parser_parse_bytes_unrecognized_format() {
-    let parser = XlsxParser::new();
+    let parser = KreuzbergParser::new();
     // Random bytes that don't match any Excel magic bytes
     let invalid_bytes = bytes::Bytes::from_static(b"This is not a valid Excel file content");
 
@@ -156,18 +160,13 @@ async fn test_xlsx_parser_parse_bytes_unrecognized_format() {
         .parse_bytes(Some("test.xlsx"), None, invalid_bytes)
         .await;
 
-    // Should fail with unrecognized format error (magic bytes don't match)
-    assert!(result.is_err());
-    let err_msg = format!("{:?}", result.err());
-    assert!(
-        err_msg.contains("Unrecognized") || err_msg.contains("format"),
-        "Error should mention unrecognized format: {err_msg}"
-    );
+    // Should fail since the bytes don't represent a valid Excel file
+    assert!(result.is_err(), "Should fail for unrecognized format");
 }
 
 #[tokio::test]
 async fn test_xlsx_parser_parse_bytes_with_ole_magic_but_invalid() {
-    let parser = XlsxParser::new();
+    let parser = KreuzbergParser::new();
     // OLE magic bytes (D0 CF 11 E0) but invalid content after
     let mut invalid_bytes = vec![0xD0, 0xCF, 0x11, 0xE0];
     invalid_bytes.extend_from_slice(b"invalid content after magic");
@@ -177,18 +176,13 @@ async fn test_xlsx_parser_parse_bytes_with_ole_magic_but_invalid() {
         .parse_bytes(Some("test.xls"), None, invalid_bytes)
         .await;
 
-    // Should fail with XLS-specific error (magic bytes matched, but content invalid)
-    assert!(result.is_err());
-    let err_msg = format!("{:?}", result.err());
-    assert!(
-        err_msg.contains("XLS") || err_msg.contains("xls"),
-        "Error should mention XLS: {err_msg}"
-    );
+    // Should fail since the content is invalid despite matching OLE magic bytes
+    assert!(result.is_err(), "Should fail for invalid XLS content");
 }
 
 #[tokio::test]
 async fn test_xlsx_parser_extracts_tables() {
-    let parser = XlsxParser::new();
+    let parser = KreuzbergParser::new();
     let test_file = get_test_file_path("simple_data.xlsx");
 
     if !test_file.exists() {
@@ -214,7 +208,7 @@ async fn test_xlsx_parser_extracts_tables() {
 
 #[tokio::test]
 async fn test_xlsx_parser_merged_cells() {
-    let parser = XlsxParser::new();
+    let parser = KreuzbergParser::new();
     let test_file = get_test_file_path("merged_cells.xlsx");
 
     if !test_file.exists() {
@@ -248,9 +242,8 @@ async fn test_xlsx_parser_merged_cells() {
 
     assert!(!tables.is_empty(), "Should have at least one table");
 
-    // Merged cells: calamine returns the value in the top-left cell of the merge,
-    // and empty strings for other cells in the merged range.
-    // Verify we can parse the file without errors and get expected row count.
+    // Merged cells: Kreuzberg returns the value in the top-left cell of the merge.
+    // Verify we can parse the file without errors and get the expected row count.
     let first_table = tables[0];
     assert!(
         first_table.rows.len() >= 3,
@@ -261,7 +254,7 @@ async fn test_xlsx_parser_merged_cells() {
 
 #[tokio::test]
 async fn test_xlsx_parser_formula_cells() {
-    let parser = XlsxParser::new();
+    let parser = KreuzbergParser::new();
     let test_file = get_test_file_path("formula_cells.xlsx");
 
     if !test_file.exists() {
@@ -295,7 +288,7 @@ async fn test_xlsx_parser_formula_cells() {
 
     assert!(!tables.is_empty(), "Should have at least one table");
 
-    // Calamine reads cached formula results from xlsx files.
+    // Kreuzberg reads cached formula results from xlsx files.
     // Note: Files created programmatically (e.g., openpyxl) without Excel
     // may not have cached values, resulting in empty cells for formulas.
     // Files saved by Excel will have computed values cached.
@@ -335,7 +328,7 @@ async fn test_xlsx_parser_formula_cells() {
     );
 
     // Formula text (starting with =) should NOT appear in output
-    // Calamine returns either computed values or empty, never raw formula text
+    // Kreuzberg returns either computed values or empty, never raw formula text
     assert!(
         !cell_texts.iter().any(|t| t.starts_with('=')),
         "Raw formula text should not appear in output, found cells: {cell_texts:?}"

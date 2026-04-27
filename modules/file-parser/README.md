@@ -6,14 +6,16 @@ File parsing module for CyberFabric / ModKit.
 
 The `cf-file-parser` crate implements the `file-parser` module and registers REST routes.
 
-Parsing backends currently include:
+All document extraction is handled by a single unified backend — [`kreuzberg =4.9.4`](https://github.com/kreuzberg-dev/kreuzberg) — which replaces the previous per-format library set (`tl`, `pdf-extract`, `calamine`, `pptx-to-md`).
 
-- Plain text
-- HTML
-- PDF
-- DOCX
-- Images
-- Stub parser (fallback)
+Supported formats:
+
+| Extension(s)              | Format                          |
+|---------------------------|---------------------------------|
+| `pdf`                     | PDF                             |
+| `html`, `htm`             | HTML                            |
+| `xlsx`, `xls`, `xlsm`, `xlsb` | Excel spreadsheets         |
+| `pptx`                    | PowerPoint presentations        |
 
 ## Configuration
 
@@ -37,4 +39,30 @@ The `parse-local` endpoints validate requested file paths before any filesystem 
 
 ## License
 
-Licensed under Apache-2.0.
+This module is licensed under **Apache-2.0**.
+
+### Third-party dependency: kreuzberg
+
+This module depends on [`kreuzberg`](https://github.com/kreuzberg-dev/kreuzberg), pinned at **`=4.9.4`** ([Elastic License 2.0](https://www.elastic.co/licensing/elastic-license)).
+
+| Version range | License |
+|---------------|---------|
+| `≤ 4.7.4` | MIT |
+| `≥ 4.8.0` (including `=4.9.4` used here) | [Elastic License 2.0 (EL-2.0)](https://www.elastic.co/licensing/elastic-license) |
+
+> ℹ️ **EL-2.0 is permitted for this use case.** The `deny.toml` license policy includes
+> an explicit exception for `kreuzberg =4.9.4` with documented rationale:
+> CyberFabric's document parsing is incidental to the platform — it is not sold as a
+> standalone document-parsing product competing with kreuzberg.
+>
+> **EL-2.0 key restrictions to be aware of:**
+>
+> - You may **not** provide the software (or a product whose primary functionality is
+>   substantially the same as kreuzberg) to third parties as a hosted or managed service.
+> - You may **not** build a product sold *primarily* as a document-parsing service that
+>   competes with kreuzberg.
+>
+> The dependency is pinned with `=4.9.4` in `Cargo.toml` to prevent silent upgrades.
+> Any version bump **must** be reviewed for license changes and approved by the
+> maintainers before merging.
+

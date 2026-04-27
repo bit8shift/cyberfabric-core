@@ -512,11 +512,8 @@ bytes = "1.11"
 mime = "0.3"
 
 # Document parsing libraries
-tl = "0.7"
-pdf-extract = "0.10"
 docx-rust = "0.1.11"
-calamine = "0.32"
-pptx-to-md = "0.4"
+kreuzberg = { version = "=4.9.4", features = ["html", "excel", "office", "pdf", "bundled-pdfium"] }
 
 # Additional testing utilities
 tokio-test = "0.4"
