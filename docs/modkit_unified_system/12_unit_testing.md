@@ -1,4 +1,5 @@
 <!-- Created: 2026-04-07 by Constructor Tech -->
+<!-- Updated: 2026-04-28 by Constructor Tech -->
 
 # Unit & Integration Testing Guide
 
@@ -57,7 +58,7 @@ Every test must pass all three:
 - HTTP routing, middleware wiring, header serialization → E2E tests
 - PostgreSQL-specific behavior (FK RESTRICT, SERIALIZABLE isolation, domain types) → E2E tests
 - Real AuthN/AuthZ pipeline with tokens → E2E tests
-- MTLS certificate verification → E2E tests
+- MTLS certificate verification → E2E tests _(p2 — deferred, not implemented yet)_
 - Cursor codec encode/decode over HTTP → E2E tests
 - Performance, load, concurrency under contention → out of scope
 

@@ -1,4 +1,5 @@
 // Created: 2026-04-16 by Constructor Tech
+// Updated: 2026-04-28 by Constructor Tech
 // @cpt-dod:cpt-cf-resource-group-dod-sdk-foundation-module-scaffold:p1
 //! Resource Group Module — contracts and domain types.
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
@@ -8,6 +9,8 @@ pub mod module;
 pub use module::ResourceGroup;
 
 // === INTERNAL MODULES ===
+#[doc(hidden)]
+pub mod api;
 #[doc(hidden)]
 pub mod domain;
 #[doc(hidden)]

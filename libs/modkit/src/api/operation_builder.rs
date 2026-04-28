@@ -1,3 +1,4 @@
+// Updated: 2026-04-28 by Constructor Tech
 //! Type-safe API operation builder with compile-time guarantees
 //!
 //! This module implements a type-state builder pattern that ensures:
@@ -1073,6 +1074,35 @@ where
         }
     }
 
+    /// Add a body-less response (e.g. `204 No Content`) — transitions from
+    /// Missing to Present.
+    ///
+    /// `OpenAPI` consumers and code-generators treat a `204` response with a
+    /// `content` block as advertising a body, which is incorrect. Use this
+    /// helper for any handler that intentionally returns no payload (typical
+    /// for `DELETE` / `PUT` semantics).
+    pub fn no_content_response(
+        mut self,
+        status: http::StatusCode,
+        description: impl Into<String>,
+    ) -> OperationBuilder<H, Present, S, A, L> {
+        self.spec.responses.push(ResponseSpec {
+            status: status.as_u16(),
+            content_type: "",
+            description: description.into(),
+            schema_name: None,
+        });
+        OperationBuilder {
+            spec: self.spec,
+            method_router: self.method_router,
+            _has_handler: self._has_handler,
+            _has_response: PhantomData::<Present>,
+            _state: self._state,
+            _auth_state: self._auth_state,
+            _license_state: self._license_state,
+        }
+    }
+
     /// Add a JSON response with a registered schema (transitions from Missing to Present).
     pub fn json_response_with_schema<T>(
         mut self,
@@ -1231,6 +1261,21 @@ where
         self.spec.responses.push(ResponseSpec {
             status: status.as_u16(),
             content_type: "application/json",
+            description: description.into(),
+            schema_name: None,
+        });
+        self
+    }
+
+    /// Add a body-less response (e.g. `204 No Content`) — additional variant.
+    pub fn no_content_response(
+        mut self,
+        status: http::StatusCode,
+        description: impl Into<String>,
+    ) -> Self {
+        self.spec.responses.push(ResponseSpec {
+            status: status.as_u16(),
+            content_type: "",
             description: description.into(),
             schema_name: None,
         });

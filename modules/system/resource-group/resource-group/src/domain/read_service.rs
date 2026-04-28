@@ -1,4 +1,5 @@
 // Created: 2026-04-16 by Constructor Tech
+// Updated: 2026-04-28 by Constructor Tech
 // @cpt-begin:cpt-cf-resource-group-dod-integration-auth-read-service:p1:inst-full
 //! Integration read service for external consumers (e.g., `AuthZ` plugin).
 //!
@@ -30,8 +31,8 @@ use crate::domain::repo::{GroupRepositoryTrait, MembershipRepositoryTrait, TypeR
 /// **Bypasses `AuthZ` enforcement** — delegates to `GroupService` unscoped
 /// methods which use `AccessScope::allow_all()`. This is by design
 /// (see DESIGN §3.6): `AuthZ` plugin is the caller, and it cannot evaluate
-/// itself (circular dependency). MTLS and in-process `ClientHub` paths both
-/// skip `AuthZ`.
+/// itself (circular dependency). The in-process `ClientHub` path therefore
+/// skips `AuthZ`.
 #[allow(unknown_lints, de0309_must_have_domain_model)]
 pub struct RgReadService<
     GR: GroupRepositoryTrait,

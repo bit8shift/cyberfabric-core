@@ -299,7 +299,7 @@ The Resource Group DESIGN is decomposed into seven features organized around the
 
 - [x] `p1` - **ID**: `cpt-cf-resource-group-feature-integration-auth`
 
-- **Purpose**: Expose the integration read service for external consumers (AuthZ plugin via `ResourceGroupReadHierarchy`), implement dual authentication modes (JWT with full AuthZ evaluation, MTLS with hierarchy-only bypass), enforce tenant scope for ownership-graph profile writes, and configure plugin gateway routing for vendor-specific provider support.
+- **Purpose**: Expose the integration read service for external consumers (AuthZ plugin via `ResourceGroupReadHierarchy`), implement JWT authentication with full AuthZ evaluation (and, deferred to `p2`, the future MTLS hierarchy-only bypass for the microservice split), enforce tenant scope for ownership-graph profile writes, and configure plugin gateway routing for vendor-specific provider support.
 
 - **Depends On**: `cpt-cf-resource-group-feature-entity-hierarchy`, `cpt-cf-resource-group-feature-membership`
 
@@ -307,11 +307,11 @@ The Resource Group DESIGN is decomposed into seven features organized around the
   - Integration read service: expose `ResourceGroupReadHierarchy` via ClientHub for AuthZ plugin consumption, returning hierarchy data without policy or SQL semantics
   - Plugin gateway routing: built-in provider (local persistence path) vs vendor-specific provider (resolve plugin instance by configured vendor, delegate to `ResourceGroupReadPluginClient`) with SecurityContext passthrough
   - JWT authentication: standard AuthZ evaluation via `PolicyEnforcer.access_scope()` on all REST endpoints, `AccessScope` applied via SecureORM for tenant-scoped queries
-  - MTLS authentication: client certificate verification against trusted CA bundle, endpoint allowlist (only `GET /groups/{group_id}/hierarchy`), AuthZ bypass for trusted system principals, system SecurityContext creation
-  - MTLS configuration: `ca_cert`, `allowed_clients` (by certificate CN), `allowed_endpoints` (method + path pairs)
+  - MTLS authentication _(p2 — deferred, not implemented yet)_: client certificate verification against trusted CA bundle, endpoint allowlist (only `GET /groups/{group_id}/hierarchy`), AuthZ bypass for trusted system principals, system SecurityContext creation
+  - MTLS configuration _(p2 — deferred, not implemented yet)_: `ca_cert`, `allowed_clients` (by certificate CN), `allowed_endpoints` (method + path pairs)
   - Tenant scope enforcement for ownership-graph profile: parent-child edges and membership writes validated for tenant-hierarchy compatibility, platform-admin provisioning exception for cross-tenant management, tenant-scoped reads via `SecurityContext.subject_tenant_id`
   - Barrier as data: `metadata.self_managed` stored in group metadata JSONB without enforcement by RG, returned in API responses within `metadata` object for consumption by Tenant Resolver and AuthZ
-  - In-process vs out-of-process: ClientHub direct call (monolith, no MTLS needed) vs MTLS-authenticated remote call (microservices)
+  - In-process vs out-of-process: ClientHub direct call (monolith, no MTLS needed) — current `p1`; MTLS-authenticated remote call (microservices) — `p2`, deferred / not implemented yet
   - SecurityContext propagation: `ctx` passed through gateway to selected provider without policy interpretation
 
 - **Out of scope**:
@@ -323,7 +323,8 @@ The Resource Group DESIGN is decomposed into seven features organized around the
 - **Requirements Covered**:
 
   - [x] `p1` - `cpt-cf-resource-group-fr-integration-read-port`
-  - [x] `p1` - `cpt-cf-resource-group-fr-dual-auth-modes`
+  - [x] `p1` - `cpt-cf-resource-group-fr-jwt-auth`
+  - [ ] `p2` - `cpt-cf-resource-group-fr-dual-auth-modes` _(deferred, not implemented yet)_
   - [x] `p1` - `cpt-cf-resource-group-fr-tenant-scope-ownership-graph`
 
 - **Design Principles Covered**:
@@ -344,15 +345,15 @@ The Resource Group DESIGN is decomposed into seven features organized around the
   - [x] `p1` - `cpt-cf-resource-group-component-integration-read-service`
 
 - **API**:
-  - GET /api/resource-group/v1/groups/{group_id}/hierarchy (JWT + MTLS)
-  - All other endpoints (JWT only, MTLS returns 403)
+  - GET /api/resource-group/v1/groups/{group_id}/hierarchy (JWT; additionally over MTLS — `p2`, deferred / not implemented yet)
+  - All other endpoints (JWT only; MTLS path returns 403 — `p2`, deferred / not implemented yet)
 
 - **Sequences**:
 
   - `cpt-cf-resource-group-seq-authz-rg-sql-split`
   - `cpt-cf-resource-group-seq-e2e-authz-flow`
   - `cpt-cf-resource-group-seq-auth-modes`
-  - `cpt-cf-resource-group-seq-mtls-authz-read`
+  - `cpt-cf-resource-group-seq-mtls-authz-read` _(p2 — deferred, not implemented yet)_
   - `cpt-cf-resource-group-seq-jwt-rg-request`
 
 ---

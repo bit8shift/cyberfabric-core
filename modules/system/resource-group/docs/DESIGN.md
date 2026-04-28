@@ -110,7 +110,8 @@ For AuthZ-facing deployments aligned with current platform architecture, `owners
 | `cpt-cf-resource-group-fr-no-authz-and-sql-logic`             | Hard separation: RG returns data only; AuthZ/PEP own constraints/SQL.                                                                 |
 | `cpt-cf-resource-group-fr-deterministic-errors`               | Unified error mapper translates domain/infrastructure failures to stable public categories.                                           |
 | `cpt-cf-resource-group-fr-force-delete`                       | Delete orchestration supports optional `force` parameter for cascade deletion of subtree and memberships.                             |
-| `cpt-cf-resource-group-fr-dual-auth-modes`                    | RG Gateway supports JWT (all endpoints, AuthZ-evaluated) and MTLS (hierarchy-only, AuthZ-bypassed) authentication paths.             |
+| `cpt-cf-resource-group-fr-jwt-auth`                           | Public RG HTTP/gRPC endpoints authenticate every request via JWT and run `PolicyEnforcer`. The AuthZ plugin's in-process `ResourceGroupReadHierarchy` reader is hierarchy-only and uses `AccessScope::allow_all()`, so it does **not** invoke `PolicyEnforcer` — this resolves the AuthZ ↔ RG circular dependency; the plugin still emits its own AuthZ constraints from the returned hierarchy. |
+| `cpt-cf-resource-group-fr-dual-auth-modes` _(p2 — deferred, not implemented yet)_ | **Future / not implemented yet.** RG Gateway will additionally support MTLS (hierarchy-only, AuthZ-bypassed) for service-to-service callers when the AuthZ plugin is split out of the RG process. Tracked as `p2`. |
 
 
 #### NFR Allocation
@@ -257,11 +258,11 @@ SMALLINT surrogate IDs (`gts_type.id`, `gts_type_id` FK columns) are a **DB-inte
 - `allowed_memberships` in type create/update requests
 - `resource_type` in membership operations (`POST /memberships/...`)
 
-If a referenced type does not exist, the operation **MUST** return a validation error. Each chained type (e.g., `gts.x.system.rg.type.v1~y.system.tn.tenant.v1~`) is a distinct type that must be registered separately — chaining does not auto-create constituent types. Registration order matters: base/resource types first, then chained RG types that reference them. Base types (including `gts.x.system.rg.type.v1~`) must be created before use — via seeding, API calls, or manual DB administration.
+If a referenced type does not exist, the operation **MUST** return a validation error. Each chained type (e.g., `gts.cf.core.rg.type.v1~y.system.tn.tenant.v1~`) is a distinct type that must be registered separately — chaining does not auto-create constituent types. Registration order matters: base/resource types first, then chained RG types that reference them. Base types (including `gts.cf.core.rg.type.v1~`) must be created before use — via seeding, API calls, or manual DB administration.
 
-**RG type prefix requirement (`gts.x.system.rg.type.v1~`)**:
-- **`type` in group operations**: `POST /groups`, `PUT /groups/{id}` — **MUST** have `gts.x.system.rg.type.v1~` prefix. Rejected without it.
-- **`allowed_parents`**: **MUST** have `gts.x.system.rg.type.v1~` prefix — parent groups are always RG types.
+**RG type prefix requirement (`gts.cf.core.rg.type.v1~`)**:
+- **`type` in group operations**: `POST /groups`, `PUT /groups/{id}` — **MUST** have `gts.cf.core.rg.type.v1~` prefix. Rejected without it.
+- **`allowed_parents`**: **MUST** have `gts.cf.core.rg.type.v1~` prefix — parent groups are always RG types.
 - **`allowed_memberships`**: **NO prefix requirement** — membership resource types are external domain types (e.g., `gts.z.system.idp.user.v1~`, `gts.z.system.lms.course.v1~`) that do not need to be RG types.
 
 This ensures the hierarchy is always governed by the RG type contract (`can_be_root`, `allowed_parents`, `allowed_memberships`), while membership resources can be any registered GTS type.
@@ -653,7 +654,7 @@ Client initialization: AuthZ plugin resolves `dyn ResourceGroupReadHierarchy` fr
 | SQL database                          | SeaORM repositories             | durable canonical + closure storage                           |
 | AuthZ Resolver SDK                    | `PolicyEnforcer` / `AuthZResolverClient` | AuthZ evaluation for JWT-authenticated RG API requests (write + read) |
 | Vendor-specific RG backend (optional) | `ResourceGroupReadPluginClient` | alternative hierarchy/membership source for integration reads |
-| AuthZ plugin consumer (optional)      | `ResourceGroupReadHierarchy`    | read hierarchy context in PDP logic (narrow, hierarchy-only, MTLS/in-process) |
+| AuthZ plugin consumer (optional)      | `ResourceGroupReadHierarchy`    | read hierarchy context in PDP logic (narrow, hierarchy-only; in-process via `ClientHub` — `p1`; MTLS transport — `p2`, deferred / not implemented yet) |
 | General consumers (optional)          | `ResourceGroupClient`           | full read+write access to types/entities/memberships/hierarchy |
 
 
@@ -861,7 +862,7 @@ Key separation of concerns:
 
 RG Module exposes its REST/gRPC API with **two authentication modes**. The mode determines whether the request passes through AuthZ evaluation.
 
-##### Mode 1: JWT (public API — all endpoints)
+##### Mode 1: JWT (public API — all endpoints) — implemented (`p1`)
 
 Standard user/service requests authenticated via JWT bearer token. **All** RG REST API endpoints are available. Every request goes through AuthZ evaluation via `PolicyEnforcer`, same as any other domain service (e.g. courses). JWT token lifecycle (expiry, refresh, revocation) is managed by the AuthN Resolver and API Gateway — RG delegates token validation entirely to the platform authentication layer and does not implement its own session timeout or token renewal logic.
 
@@ -874,7 +875,28 @@ Applies to:
 - `GET /api/resource-group/v1/memberships` — list memberships
 - `POST/DELETE /api/resource-group/v1/memberships/{...}` — membership lifecycle
 
-##### Mode 2: MTLS (private API — hierarchy endpoint only)
+In the current monolith deployment, the AuthZ plugin reads hierarchy via the in-process
+`ResourceGroupReadHierarchy` trait registered in `ClientHub`. That path
+**bypasses `PolicyEnforcer` invocation** by construction — the plugin
+cannot evaluate itself (circular dependency), so the trait
+implementation in `RgReadService` delegates to unscoped reads
+(`AccessScope::allow_all()`) without going through `PolicyEnforcer`.
+The bypass is on the *invocation* side only: AuthZ enforcement is
+still produced by the plugin **after** it receives the hierarchy data,
+in the form of tenant / subtree constraints attached to the original
+caller's request. The `dyn ResourceGroupReadHierarchy` type narrows
+the surface to hierarchy-only operations, so the plugin cannot reach
+non-hierarchy reads or any write paths through this channel.
+
+##### Mode 2: MTLS (private API — hierarchy endpoint only) — deferred (`p2`, not implemented yet)
+
+> **Status: `p2` — designed, not implemented yet.** The MTLS path is the
+> service-to-service authentication mode planned for a future microservice
+> deployment that splits the AuthZ plugin out of the RG process. The
+> current monolith uses the in-process `ResourceGroupReadHierarchy` path
+> described above and does not need this transport. The design is kept
+> here so the future split has a documented contract; do not implement
+> this in the current iteration.
 
 Service-to-service requests authenticated via mutual TLS client certificate. Used exclusively by AuthZ plugin to read tenant hierarchy. **Only one endpoint** is available in MTLS mode:
 
@@ -887,24 +909,27 @@ MTLS requests **bypass AuthZ evaluation entirely** — no `PolicyEnforcer` call,
 2. MTLS certificate identity is a trusted system principal — access is granted by transport-level authentication
 3. The single allowed endpoint returns read-only hierarchy data — minimal attack surface
 
-##### Authentication Decision Flow
+##### Authentication Decision Flow (`p2` — covers the future MTLS path)
+
+> **Status: `p2` — applies only when the deferred MTLS path lands.** Today
+> all traffic goes through the JWT branch.
 
 RG Gateway receives requests from two types of callers and routes them through different authentication paths:
 
-- **JWT path** — Admin (Instance/Tenant) or App sends a request with a bearer token. RG Gateway delegates authentication to AuthN Resolver, then runs AuthZ evaluation via `PolicyEnforcer` before executing the query.
-- **MTLS path** — AuthZ Plugin (in microservice deployment) sends a request with a client certificate. RG Gateway verifies the certificate against a trusted CA bundle, checks the endpoint allowlist, and executes directly without AuthZ evaluation.
+- **JWT path** (`p1`) — Admin (Instance/Tenant) or App sends a request with a bearer token. RG Gateway delegates authentication to AuthN Resolver, then runs AuthZ evaluation via `PolicyEnforcer` before executing the query.
+- **MTLS path** (`p2`, deferred) — AuthZ Plugin (in microservice deployment) sends a request with a client certificate. RG Gateway verifies the certificate against a trusted CA bundle, checks the endpoint allowlist, and executes directly without AuthZ evaluation.
 
 ```mermaid
 flowchart TD
     REQ["Incoming request to RG REST API<br/>(from Admin, App, or AuthZ Plugin)"] --> AUTH_CHECK{RG Gateway:<br/>authentication method?}
 
-    AUTH_CHECK -->|"JWT bearer token<br/>(Admin / App)"| JWT_PATH[AuthN Resolver validates JWT]
+    AUTH_CHECK -->|"JWT bearer token<br/>(Admin / App) — p1"| JWT_PATH[AuthN Resolver validates JWT]
     JWT_PATH --> SEC_CTX[SecurityContext extracted from token]
     SEC_CTX --> AUTHZ["RG Gateway calls<br/>PolicyEnforcer.access_scope()"]
     AUTHZ --> CONSTRAINTS[RG Gateway applies<br/>AccessScope to query]
     CONSTRAINTS --> EXEC["RG Service executes<br/>query with SQL predicates"]
 
-    AUTH_CHECK -->|"MTLS client cert<br/>(AuthZ Plugin)"| MTLS_PATH["RG Gateway verifies client cert<br/>against trusted CA bundle"]
+    AUTH_CHECK -->|"MTLS client cert<br/>(AuthZ Plugin) — p2 deferred"| MTLS_PATH["RG Gateway verifies client cert<br/>against trusted CA bundle"]
     MTLS_PATH --> ENDPOINT_CHECK{RG Gateway:<br/>endpoint in MTLS allowlist?}
     ENDPOINT_CHECK -->|"Yes: /groups/{id}/hierarchy"| SYSTEM_CTX["RG Gateway creates<br/>System SecurityContext"]
     SYSTEM_CTX --> EXEC_DIRECT["RG Hierarchy Service executes<br/>directly — no AuthZ evaluation"]
@@ -915,9 +940,12 @@ flowchart TD
     style EXEC fill:#6b6,color:#fff
 ```
 
-##### Sequence: MTLS request from AuthZ plugin
+##### Sequence: MTLS request from AuthZ plugin (`p2` — deferred, not implemented yet)
 
 **ID**: `cpt-cf-resource-group-seq-mtls-authz-read`
+
+> **Status: `p2` — design retained for the future microservice split. Not
+> implemented in the current monolith.**
 
 ```mermaid
 sequenceDiagram
@@ -964,7 +992,7 @@ sequenceDiagram
 
     RG_GW->>PE: access_scope(ctx, RESOURCE_GROUP, "list")
     PE->>AZ: evaluate(EvaluationRequest)
-    AZ->>RG_HIER: list_group_depth(system_ctx, T1, ...) [via MTLS/ClientHub]
+    AZ->>RG_HIER: list_group_depth(system_ctx, T1, ...) [in-process via ClientHub; MTLS variant: p2 — deferred]
     RG_HIER-->>AZ: [{T1, depth:0, barrier:false}, {T7, depth:1, barrier:true}]
     Note over AZ: TR: BarrierMode::Respect → T7 skipped<br/>AuthZ: exclude T7 from AccessScope
     AZ-->>PE: decision=true, constraints=[owner_tenant_id IN (T1)]
@@ -981,13 +1009,17 @@ Note: when a user calls RG REST API with JWT, the AuthZ flow is **identical** to
 1. API Gateway authenticates JWT → `SecurityContext`
 2. RG gateway calls `PolicyEnforcer.access_scope()` → AuthZ evaluates → constraints returned
 3. RG applies `AccessScope` to its own query via SecureORM (SecureORM maps AuthZ property `owner_tenant_id` to actual column `tenant_id` in `resource_group` table)
-4. AuthZ plugin internally reads hierarchy via `ResourceGroupReadHierarchy` (MTLS or in-process ClientHub) — this internal read bypasses AuthZ
+4. AuthZ plugin internally reads hierarchy via `ResourceGroupReadHierarchy` — in-process via `ClientHub` (`p1`) today, with the MTLS transport variant (`p2`, deferred / not implemented yet) reserved for the future microservice split — this internal read bypasses AuthZ
 
-The key insight: RG is simultaneously a **consumer** of AuthZ (for its own JWT-authenticated endpoints) and a **data provider** for AuthZ (via MTLS/ClientHub hierarchy reads). The MTLS bypass prevents the circular call.
+The key insight: RG is simultaneously a **consumer** of AuthZ (for its own JWT-authenticated endpoints) and a **data provider** for AuthZ (via in-process ClientHub hierarchy reads; an MTLS variant is `p2` — deferred). The bypass at the trait/transport level prevents the circular call.
 
-##### MTLS Configuration and Certificate Verification
+##### MTLS Configuration and Certificate Verification (`p2` — deferred, not implemented yet)
 
-MTLS authentication is configured at the RG gateway level and includes two parts: certificate trust and endpoint allowlist.
+> **Status: `p2` — designed, not implemented yet.** Configuration shape
+> retained for the future microservice split; do not wire this in the
+> current monolith.
+
+MTLS authentication will be configured at the RG gateway level and includes two parts: certificate trust and endpoint allowlist.
 
 **Certificate verification process** (performed by RG Gateway on every MTLS request):
 
@@ -1017,12 +1049,12 @@ Only explicitly listed method+path combinations are reachable via MTLS. Any requ
 
 ##### In-Process vs Out-of-Process
 
-| Deployment | AuthZ → RG hierarchy read | Auth mechanism |
-| ---------- | ------------------------- | -------------- |
-| Monolith (single process) | `hub.get::<dyn ResourceGroupReadHierarchy>()` — direct in-process call via ClientHub | No network auth needed — trusted in-process call, system `SecurityContext` |
-| Microservices (separate processes) | gRPC/REST call to RG service | MTLS client certificate — only `/groups/{id}/hierarchy` endpoint allowed |
+| Deployment | AuthZ → RG hierarchy read | Auth mechanism | Status |
+| ---------- | ------------------------- | -------------- | ------ |
+| Monolith (single process) | `hub.get::<dyn ResourceGroupReadHierarchy>()` — direct in-process call via ClientHub | No network auth needed — trusted in-process call, system `SecurityContext` | `p1` — implemented |
+| Microservices (separate processes) | gRPC/REST call to RG service | MTLS client certificate — only `/groups/{id}/hierarchy` endpoint allowed | `p2` — deferred, not implemented yet |
 
-In both cases, the AuthZ plugin uses `ResourceGroupReadHierarchy` trait. The trait implementation is either a direct local call (monolith) or an MTLS-authenticated remote call (microservices). The RG gateway applies the same allowlist logic in both cases — but in monolith mode, the in-process ClientHub path skips the gateway entirely (no HTTP, no MTLS, no allowlist check needed — the type system enforces that only `list_group_depth` is callable via `dyn ResourceGroupReadHierarchy`).
+In both cases, the AuthZ plugin uses `ResourceGroupReadHierarchy` trait. The trait implementation is either a direct local call (monolith — `p1`) or an MTLS-authenticated remote call (microservices — `p2`, deferred / not implemented yet). The RG gateway applies the same allowlist logic in both cases — but in monolith mode, the in-process ClientHub path skips the gateway entirely (no HTTP, no MTLS, no allowlist check needed — the type system enforces that only `list_group_depth` is callable via `dyn ResourceGroupReadHierarchy`).
 
 ### 3.7 Database schemas & tables
 
@@ -1256,7 +1288,8 @@ RG relies on database-level performance rather than application-level caching:
 Notes:
   - `resource.type` and `action.name` are illustrative names following CyberFabric AuthZ conventions. Actual GTS type paths and action names are configured in the AuthZ policy.
   - Standard action vocabulary: `list` (collection), `read` (single resource), `create`, `update`, `delete` — aligned with [AuthZ usage scenarios](../../../docs/arch/authorization/AUTHZ_USAGE_SCENARIOS.md).
-  - MTLS-authenticated requests (AuthZ plugin only) bypass `PolicyEnforcer` entirely — see [RG Authentication Modes](#rg-authentication-modes-jwt-vs-mtls).
+  - The AuthZ plugin reads hierarchy in-process via `ResourceGroupReadHierarchy` registered in `ClientHub` and **bypasses `PolicyEnforcer` invocation** on those reads (`AccessScope::allow_all()`); the plugin still produces AuthZ tenant/subtree constraints from the returned hierarchy — see [RG Authentication Modes: JWT vs MTLS](#rg-authentication-modes-jwt-vs-mtls).
+  - MTLS-authenticated requests (AuthZ plugin only) **also** bypass `PolicyEnforcer` entirely — `p2`, **deferred / not implemented yet**, planned for the future microservice split — see [RG Authentication Modes: JWT vs MTLS](#rg-authentication-modes-jwt-vs-mtls).
   - `listGroupHierarchy` shares `resource_group` + `read` permission with `getGroup` — both are group read operations; the AuthZ policy may differentiate them if needed.
 
 ### Reliability Architecture

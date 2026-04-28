@@ -1,3 +1,4 @@
+// Updated: 2026-04-28 by Constructor Tech
 //! `OpenAPI` registry for schema and operation management
 //!
 //! This module provides a standalone `OpenAPI` registry that collects operation specs
@@ -250,6 +251,14 @@ impl OpenApiRegistryImpl {
             // Responses
             let mut responses = ResponsesBuilder::new();
             for r in &spec.responses {
+                // Body-less response (e.g. 204 No Content) is signalled by an
+                // empty `content_type`. Emit just `description` — attaching a
+                // `content` block would make code-generators expect a body.
+                if r.content_type.is_empty() {
+                    let resp = ResponseBuilder::new().description(&r.description).build();
+                    responses = responses.response(r.status.to_string(), resp);
+                    continue;
+                }
                 let is_json_like = r.content_type == "application/json"
                     || r.content_type == problem::APPLICATION_PROBLEM_JSON
                     || r.content_type == "text/event-stream";

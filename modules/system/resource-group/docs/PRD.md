@@ -52,7 +52,7 @@
   - [8.1 Types](#81-types)
   - [8.2 Groups](#82-groups)
   - [8.3 Membership](#83-membership)
-  - [8.4 Group Hierarchy (MTLS AuthZ)](#84-group-hierarchy-mtls-authz)
+  - [8.4 Group Hierarchy (AuthZ Plugin Read Path)](#84-group-hierarchy-authz-plugin-read-path)
 - [9. Acceptance Criteria](#9-acceptance-criteria)
 - [10. Dependencies](#10-dependencies)
 - [11. Assumptions](#11-assumptions)
@@ -313,7 +313,7 @@ A type includes:
 - `schema_id` (unique GTS type path, case-insensitive)
 - `can_be_root` (boolean; `true` means the type permits root placement — no `parent_id`). Resolved from `x-gts-traits` in the registered GTS schema.
 - `allowed_parents` (allowed parent type codes; may be empty if the type is root-only). Invariant: `can_be_root OR len(allowed_parents) >= 1` — a type must have at least one valid placement
-- `allowed_memberships` (GTS type paths of resource types allowed as members of groups of this type, e.g. `["gts.x.system.idp.user.v1~"]`)
+- `allowed_memberships` (GTS type paths of resource types allowed as members of groups of this type, e.g. `["gts.cf.core.idp.user.v1~"]`)
 - `metadata_schema` (optional JSON Schema — defines the structure and validation rules for the `metadata` field on group instances of this type)
 
 #### Validate Type Code Format
@@ -390,7 +390,7 @@ The module **MUST** provide API operations for:
 Entity fields (GTS-aligned naming):
 
 - `id` (UUID) — group identifier
-- `type` (GTS chained type path, e.g. `gts.x.system.rg.type.v1~w.system.org.department.v1~`)
+- `type` (GTS chained type path, e.g. `gts.cf.core.rg.type.v1~w.system.org.department.v1~`)
 - `name` (1..255) — display name
 - `metadata` (object) — type-specific fields defined by the chained RG type schema. Examples: `metadata.self_managed`, `metadata.custom_domain`, `metadata.category`. For types supporting barrier semantics, `metadata.self_managed` (boolean) is included here.
 - `hierarchy` (object) — RG hierarchy context:
@@ -646,20 +646,27 @@ The module **MUST** map all failures to deterministic categories:
 
 ### 5.9 Authentication Modes
 
-- [x] `p1` - **ID**: `cpt-cf-resource-group-fr-dual-auth-modes`
+- [x] `p1` - **ID**: `cpt-cf-resource-group-fr-jwt-auth`
 
-RG REST API supports two authentication modes:
+Every public RG REST/gRPC endpoint authenticates via JWT bearer token and goes through AuthZ evaluation via `PolicyEnforcer` — identical flow to any other domain service (courses, users, etc.). The AuthZ plugin reads RG hierarchy via the in-process `ResourceGroupReadHierarchy` trait registered in `ClientHub`; that path uses `AccessScope::allow_all()` and **does not** invoke `PolicyEnforcer` (resolving the AuthZ ↔ RG circular dependency at the type level). The plugin still emits its own AuthZ tenant/subtree constraints from the returned hierarchy.
 
-**JWT (public, all endpoints)**: standard user/service requests via bearer token. All endpoints available. Every request goes through AuthZ evaluation via `PolicyEnforcer` — identical flow to any other domain service (courses, users, etc.).
+- [ ] `p2` - **ID**: `cpt-cf-resource-group-fr-dual-auth-modes`
+
+> **Status: `p2` — designed, not implemented yet.** Planned for the
+> future microservice deployment that splits the AuthZ plugin out of the
+> RG process. The design is retained in this PRD so the future split has
+> a documented contract; do not implement this in the current iteration.
+
+In addition to JWT, RG REST API will support an MTLS path:
 
 **MTLS (private, hierarchy endpoint only)**: service-to-service requests via mutual TLS client certificate. Used by AuthZ plugin to read tenant hierarchy. Only `GET /groups/{group_id}/hierarchy` is allowed — all other endpoints return `403 Forbidden`. MTLS requests **bypass AuthZ evaluation entirely** because:
 - AuthZ plugin is the caller and cannot evaluate itself (circular dependency)
 - MTLS certificate identity is a trusted system principal
 - Single read-only endpoint — minimal attack surface
 
-In monolith deployment, AuthZ uses `ResourceGroupReadHierarchy` via in-process ClientHub — no network, no MTLS, type system enforces hierarchy-only access. In microservice deployment, the same trait is backed by an MTLS-authenticated gRPC/REST call.
+In monolith deployment, AuthZ uses `ResourceGroupReadHierarchy` via in-process ClientHub — no network, no MTLS, type system enforces hierarchy-only access. In a future microservice deployment (`p2`), the same trait will be backed by an MTLS-authenticated gRPC/REST call.
 
-See DESIGN.md `cpt-cf-resource-group-seq-auth-modes` for detailed sequence diagrams.
+See DESIGN.md `cpt-cf-resource-group-seq-auth-modes` for detailed sequence diagrams (the MTLS sub-sequence is `p2` — deferred).
 
 ## 6. Non-Functional Requirements
 
@@ -780,7 +787,7 @@ See DESIGN.md for full Rust trait definitions, SDK schemas, and usage examples.
 
 ### 7.2 Authentication Modes
 
-See `cpt-cf-resource-group-fr-dual-auth-modes` in section 5.9 for the full authentication modes requirement.
+See `cpt-cf-resource-group-fr-jwt-auth` in section 5.9 for the implemented JWT authentication, and `cpt-cf-resource-group-fr-dual-auth-modes` _(p2 — deferred, not implemented yet)_ for the future MTLS service-to-service path.
 
 ## 8. Use Cases
 
@@ -1065,9 +1072,9 @@ See `cpt-cf-resource-group-fr-dual-auth-modes` in section 5.9 for the full authe
 - **AND** group existence and tenant compatibility are validated during seeding
 - **AND** seeding is idempotent — repeated runs produce the same result
 
-### 8.4 Group Hierarchy (MTLS AuthZ)
+### 8.4 Group Hierarchy (AuthZ Plugin Read Path)
 
-#### Scenario: AuthZ Plugin Resolves Tenant Hierarchy Downward
+#### Scenario: AuthZ Plugin Resolves Tenant Hierarchy Downward (in-process via `ClientHub`)
 
 - **GIVEN** stored hierarchy (all groups of type `tenant` or `group`):
   ```
@@ -1079,7 +1086,7 @@ See `cpt-cf-resource-group-fr-dual-auth-modes` in section 5.9 for the full authe
       └── G21 (group, tenant_id=T7)
   ```
 - **AND** AuthZ plugin needs to resolve which tenants/groups are visible to a user whose `subject_tenant_id = T1`
-- **WHEN** plugin calls `list_group_depth(ctx, T1, filter="hierarchy/depth ge 0 and type in ('tenant','group')")` via MTLS
+- **WHEN** plugin calls `get_group_descendants(ctx, T1, &ODataQuery::filter("type in ('tenant','group')"))` via the in-process `ResourceGroupReadHierarchy` trait registered in `ClientHub` (the MTLS transport variant is `p2` — deferred, not implemented yet)
 - **THEN** RG returns:
   | id  | type   | hierarchy.tenant_id | hierarchy.depth |
   |-----|--------|---------------------|-----------------|
@@ -1092,7 +1099,11 @@ See `cpt-cf-resource-group-fr-dual-auth-modes` in section 5.9 for the full authe
 - **AND** plugin uses `tenant_id` from each row to build tenant-scoped AuthZ constraints
 - **AND** RG returns no policy decisions — only data rows
 
-#### Scenario: MTLS Request to Non-Hierarchy Endpoint
+#### Scenario: MTLS Request to Non-Hierarchy Endpoint (`p2` — deferred, not implemented yet)
+
+> **Status: `p2` — designed, not implemented yet.** This scenario applies
+> only when the deferred MTLS path lands in a future microservice
+> deployment.
 
 - **GIVEN** caller authenticates via MTLS client certificate
 - **WHEN** caller sends request to `POST /api/resource-group/v1/groups` (non-hierarchy endpoint)

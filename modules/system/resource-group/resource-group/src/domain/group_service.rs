@@ -1,4 +1,5 @@
 // Created: 2026-04-16 by Constructor Tech
+// Updated: 2026-04-28 by Constructor Tech
 // @cpt-begin:cpt-cf-resource-group-dod-entity-hier-entity-service:p1:inst-full
 // @cpt-dod:cpt-cf-resource-group-dod-testing-entity-hierarchy:p1
 //! Domain service for resource group entity management.
@@ -32,7 +33,7 @@ use crate::domain::validation;
 
 /// `AuthZ` resource type descriptor for resource groups.
 pub const RG_GROUP_RESOURCE: ResourceType = ResourceType {
-    name: "gts.x.system.rg.group.v1~",
+    name: "gts.cf.core.rg.group.v1~",
     supported_properties: &[pep_properties::OWNER_TENANT_ID, pep_properties::RESOURCE_ID],
 };
 
@@ -396,9 +397,8 @@ impl<GR: GroupRepositoryTrait, TR: TypeRepositoryTrait> GroupService<GR, TR> {
     // They use `AccessScope::allow_all()` — no tenant WHERE clause.
     //
     // This is by design (DESIGN §3.6): the AuthZ plugin is the primary
-    // consumer of these reads. It cannot evaluate itself (circular dep).
-    // In microservice deployments these endpoints are MTLS-only; in
-    // monolith mode the in-process ClientHub path skips AuthZ entirely.
+    // consumer of these reads. It cannot evaluate itself (circular dep),
+    // so the in-process ClientHub path skips AuthZ entirely.
     //
     // SECURITY: do NOT expose these methods via REST handlers.
     // REST uses the scoped variants (`get_group_descendants` / `get_group_ancestors`).

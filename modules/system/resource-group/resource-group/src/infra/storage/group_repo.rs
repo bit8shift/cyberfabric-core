@@ -1,4 +1,5 @@
 // Created: 2026-04-16 by Constructor Tech
+// Updated: 2026-04-28 by Constructor Tech
 // @cpt-begin:cpt-cf-resource-group-dod-entity-hier-hierarchy-engine:p1:inst-full
 //! Persistence layer for resource group entity management.
 //!
@@ -466,7 +467,7 @@ impl GroupRepositoryTrait for GroupRepository {
     /// List groups with `OData` filtering and pagination.
     ///
     /// The `type` filter field accepts GTS type path strings from the API
-    /// (e.g. `$filter=type eq 'gts.x.system.rg.type.v1~x.test.org.v1~'`).
+    /// (e.g. `$filter=type eq 'gts.cf.core.rg.type.v1~x.test.org.v1~'`).
     /// Before passing to `SeaORM`, string values for the `type` field are
     /// resolved to SMALLINT surrogate IDs at the persistence boundary.
     /// List groups with `OData` filtering and pagination.

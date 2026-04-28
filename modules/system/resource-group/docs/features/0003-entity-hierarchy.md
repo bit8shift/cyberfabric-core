@@ -460,7 +460,7 @@ The plan was originally based on a gap analysis against acceptance criteria defi
 
 **Scope**: Domain service tests with SQLite in-memory, in-source `#[cfg(test)]` for pure logic, metadata validation against `metadata_schema`.
 
-**Out of scope**: E2E tests (Feature 0007), PostgreSQL-specific tests, MTLS, performance.
+**Out of scope**: E2E tests (Feature 0007), PostgreSQL-specific tests, MTLS (`p2` — deferred, not implemented yet), performance.
 
 ### Coverage Summary
 
@@ -470,7 +470,7 @@ The plan was originally based on a gap analysis against acceptance criteria defi
 
 | File | Tests | Covers |
 |------|-------|--------|
-| In-source `#[cfg(test)]` (lib.rs) | 23 | Inline tests in `auth.rs` (MTLS/JWT mode routing, path matching), `dto.rs` (DTO serde attributes, `type` rename, camelCase), `odata_mapper.rs` (Type/Group/Hierarchy/Membership ODataMapper field→column) |
+| In-source `#[cfg(test)]` (lib.rs) | 23 | Inline tests in `auth.rs` (JWT mode routing — `p1`; MTLS mode routing and path matching — `p2`, deferred / not implemented yet), `dto.rs` (DTO serde attributes, `type` rename, camelCase), `odata_mapper.rs` (Type/Group/Hierarchy/Membership ODataMapper field→column) |
 | `api_rest_test.rs` | 54 | Type CRUD REST (create 201, dup 409, invalid 400, list 200, get 200/404, delete 204), Group REST (create/list/get/update/delete/hierarchy), Membership REST (add/remove/list), RFC 9457 error format + Content-Type verification (TC-REST-10), deserialization errors, SMALLINT non-exposure, metadata in REST responses, route smoke all 14 endpoints (RG7) |
 | `authz_integration_test.rs` | 9 | PolicyEnforcer tenant scoping, deny-all, allow-all, resource_id passing, all CRUD actions, full chain list_groups/deny |
 | `domain_unit_test.rs` | 79 | `validate_type_code` (5 cases), `DomainError` construction (13 variants), `DomainError` → `ResourceGroupError` mapping, `DomainError` → `Problem` mapping, serialization failure detection, `EnforcerError` → `DomainError` conversions, `DbErr` → `DomainError`, ADR-001 hierarchy reproduction, GTS-specific logic, invalid/non-GTS input validation |
@@ -793,7 +793,7 @@ Test setup: SQLite in-memory + TypeService + GroupService with configurable Quer
 - **Assert**: 400/422
 
 #### TC-DESER-03: Create type with `can_be_root` missing [P1]
-- Body: `{"code": "gts.x.system.rg.type.v1~test.v1~"}`
+- Body: `{"code": "gts.cf.core.rg.type.v1~test.v1~"}`
 - **Assert**: 400/422 (required field missing — no `#[serde(default)]` on `can_be_root`)
 
 #### TC-DESER-04: Create group with `type` field missing [P1]
@@ -1003,7 +1003,7 @@ GTS-level validation (33 tests in `rg_gts_type_system_tests.rs`) validates at sc
 
 #### TC-ADR-16: Chained type path format in RG [P1]
 - ADR uses: `gts.x.core.rg.type.v1~y.core.tn.tenant.v1~` (multi-segment)
-- Code validates prefix: `gts.x.system.rg.type.v1~` (different namespace!)
+- Code validates prefix: `gts.cf.core.rg.type.v1~` (different namespace!)
 - **Assert**: Verify which prefix the code actually requires. If `system` not `core` → document discrepancy with ADR.
 
 #### TC-ADR-17: Type response contains no SMALLINT IDs [P1]
@@ -1064,7 +1064,7 @@ GTS-level validation (33 tests in `rg_gts_type_system_tests.rs`) validates at sc
   - GET /groups/{random-uuid} → 404 Not Found
   - POST /types {duplicate code} → 409 Conflict
   - POST /types {invalid body} → 400 Bad Request
-  - POST /groups {type "gts.x.system.rg.type.v1~nonexistent.v1~"} → 404 (TypeNotFound)
+  - POST /groups {type "gts.cf.core.rg.type.v1~nonexistent.v1~"} → 404 (TypeNotFound)
 - **Assert per response**:
   - HTTP status code matches expected
   - `Content-Type` header contains `application/problem+json`

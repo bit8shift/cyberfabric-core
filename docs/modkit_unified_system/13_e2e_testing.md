@@ -1,4 +1,5 @@
 <!-- Created: 2026-04-07 by Constructor Tech -->
+<!-- Updated: 2026-04-28 by Constructor Tech -->
 
 # E2E Testing Guide
 
@@ -268,7 +269,7 @@ Never use `pytest-rerunfailures` as a permanent fix. Retrying a flaky test hides
 testing/e2e/modules/<module_name>/
 ├── conftest.py                   ← helpers, timeout config, factory fixtures
 ├── test_authz_tenant_scoping.py  ← AuthZ + tenant isolation seams (if applicable)
-├── test_mtls_auth.py             ← MTLS certificate verification (if applicable)
+├── test_mtls_auth.py             ← MTLS certificate verification (if applicable; p2 — deferred, not implemented yet)
 ├── test_integration_seams.py     ← Core integration seam tests (per module)
 ```
 
@@ -528,7 +529,7 @@ Some E2E tests are conditional on infrastructure availability:
 | Suite | Skip condition | Description |
 |-------|---------------|-------------|
 | **Cross-tenant isolation** | `E2E_AUTH_TOKEN_TENANT_B` not set | Tests requiring two real tokens from different tenants |
-| **MTLS** | `E2E_MTLS_CERT_DIR` not set | Certificate-based authentication verification |
+| **MTLS** _(p2 — deferred, not implemented yet)_ | `E2E_MTLS_CERT_DIR` not set | Certificate-based authentication verification |
 
 All core integration seam tests run with a single token, no special infrastructure.
 
@@ -571,7 +572,7 @@ A test that can be removed without reducing integration confidence should not ex
 
 **Isolation:**
 - Each test creates its own data — no cross-test dependencies
-- Optional tests (cross-tenant, MTLS) skip gracefully when infrastructure unavailable
+- Optional tests (cross-tenant, MTLS — the latter is `p2`, deferred / not implemented yet) skip gracefully when infrastructure unavailable
 - No test duplicates unit test domain logic — if removing the test doesn't reduce integration confidence, the test shouldn't exist
 
 > Design guided by [Google SMURF (2024)](https://testing.googleblog.com/2024/10/smurf-beyond-test-pyramid.html): each test justified by high **Fidelity** (real PG + real AuthZ) that compensates for lower **Speed** vs unit tests.

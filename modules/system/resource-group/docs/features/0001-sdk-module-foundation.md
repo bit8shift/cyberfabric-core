@@ -281,7 +281,7 @@ In-source `#[cfg(test)]` tests for filter field definitions and DTO conversions:
 ## 6. Acceptance Criteria
 
 - [x] SDK crate (`resource-group-sdk`) compiles with all model types, trait contracts, and error types defined
-- [x] `GtsTypePath::new("gts.x.system.rg.type.v1~")` succeeds; `GtsTypePath::new("invalid")` returns validation error
+- [x] `GtsTypePath::new("gts.cf.core.rg.type.v1~")` succeeds; `GtsTypePath::new("invalid")` returns validation error
 - [x] All 6 DB tables are created by migration scripts with correct constraints and indexes
 - [x] SeaORM entities compile and map to the DB schema without runtime errors
 - [x] Module registers `dyn ResourceGroupClient` and `dyn ResourceGroupReadHierarchy` in ClientHub during Phase 1 init
@@ -305,7 +305,7 @@ Other modules (`nodes-registry`, `types-registry`) place pure-logic tests direct
 
 #### TC-SDK-01: GtsTypePath::new() valid path [P1]
 - **Covers**: G36, 0001-AC-2
-- **Input**: `"gts.x.system.rg.type.v1~"`
+- **Input**: `"gts.cf.core.rg.type.v1~"`
 - **Assert**: `Ok(GtsTypePath)`, `as_str()` returns lowercase
 
 #### TC-SDK-02: GtsTypePath::new() empty string [P1]
@@ -328,32 +328,32 @@ Other modules (`nodes-registry`, `types-registry`) place pure-logic tests direct
 
 #### TC-SDK-06: GtsTypePath::new() invalid format - uppercase chars [P1]
 - **Covers**: G38
-- **Input**: `"gts.x.system.rg.type.v1~"` with uppercase -> trimmed/lowercased
+- **Input**: `"gts.cf.core.rg.type.v1~"` with uppercase -> trimmed/lowercased
 
 #### TC-SDK-07: GtsTypePath::new() trims whitespace and lowercases [P2]
 - **Covers**: G36
 - **Input**: `"  GTS.X.System.RG.Type.V1~  "`
-- **Assert**: `Ok`, `as_str() == "gts.x.system.rg.type.v1~"`
+- **Assert**: `Ok`, `as_str() == "gts.x.system.rg.type.v1~"` (`new` only normalizes case/whitespace; it does not rewrite the GTS namespace)
 
 #### TC-SDK-08: GtsTypePath::new() chained path (multi-segment) [P1]
 - **Covers**: G38
-- **Input**: `"gts.x.system.rg.type.v1~x.test.v1~"`
+- **Input**: `"gts.cf.core.rg.type.v1~x.test.v1~"`
 - **Assert**: `Ok`
 
 #### TC-SDK-09: GtsTypePath::new() double tilde (empty segment) [P2]
 - **Covers**: G38
-- **Input**: `"gts.x.system.rg.type.v1~~"`
+- **Input**: `"gts.cf.core.rg.type.v1~~"`
 - **Assert**: `Err` (empty segment between tildes)
 
 #### TC-SDK-10: GtsTypePath::new() special chars in segment [P2]
 - **Covers**: G38
-- **Input**: `"gts.x.system.rg.type.v1~hello-world~"` (hyphen not allowed)
+- **Input**: `"gts.cf.core.rg.type.v1~hello-world~"` (hyphen not allowed)
 - **Assert**: `Err`
 
 #### TC-SDK-11: GtsTypePath serde round-trip (JSON) [P1]
 - **Covers**: G37
 - **Setup**: Serialize `GtsTypePath` to JSON string, deserialize back
-- **Assert**: `serde_json::to_string(&path)` produces `"gts.x.system.rg.type.v1~"`, deserialize back equals original
+- **Assert**: `serde_json::to_string(&path)` produces `"gts.cf.core.rg.type.v1~"`, deserialize back equals original
 
 #### TC-SDK-12: GtsTypePath serde invalid JSON string [P1]
 - **Covers**: G37
@@ -495,7 +495,7 @@ Tests S1, S2, S8, S9 verify integration seams that unit tests (TC-DTO-*, TC-SDK-
 testing/e2e/modules/resource_group/
 ├── conftest.py                          ← helpers, timeout config
 ├── test_authz_tenant_scoping.py         ← existing (9 tests) — keep as-is
-├── test_mtls_auth.py                    ← existing (4 tests) — keep as-is
+├── test_mtls_auth.py                    ← (p2 — deferred, not implemented yet) 4 MTLS tests; do not run in current iteration
 ├── test_integration_seams.py            ← 10 integration seam tests
 ```
 

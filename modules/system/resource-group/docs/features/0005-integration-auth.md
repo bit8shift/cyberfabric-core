@@ -16,7 +16,8 @@
   - [1.4 References](#14-references)
 - [2. Actor Flows (CDSL)](#2-actor-flows-cdsl)
   - [JWT Request to RG REST API](#jwt-request-to-rg-rest-api)
-  - [MTLS Request from AuthZ Plugin](#mtls-request-from-authz-plugin)
+  - [In-Process Hierarchy Read by AuthZ Plugin](#in-process-hierarchy-read-by-authz-plugin)
+  - [MTLS Request from AuthZ Plugin (`p2` — deferred, not implemented yet)](#mtls-request-from-authz-plugin-p2--deferred-not-implemented-yet)
   - [Plugin Gateway Routing](#plugin-gateway-routing)
 - [3. Processes / Business Logic (CDSL)](#3-processes--business-logic-cdsl)
   - [Tenant Scope Enforcement for Ownership-Graph Writes](#tenant-scope-enforcement-for-ownership-graph-writes)
@@ -49,7 +50,7 @@ Expose the integration read service (`ResourceGroupReadHierarchy`) for external 
 
 This feature bridges RG with the AuthZ ecosystem. The integration read port provides a stable, policy-agnostic data contract for hierarchy reads. Dual auth modes resolve the circular dependency between RG (needs AuthZ for its own endpoints) and AuthZ (needs RG for hierarchy data). Tenant scope enforcement ensures ownership-graph integrity for AuthZ-facing deployments.
 
-**Requirements**: `cpt-cf-resource-group-fr-integration-read-port`, `cpt-cf-resource-group-fr-dual-auth-modes`, `cpt-cf-resource-group-fr-tenant-scope-ownership-graph`
+**Requirements**: `cpt-cf-resource-group-fr-integration-read-port`, `cpt-cf-resource-group-fr-jwt-auth`, `cpt-cf-resource-group-fr-tenant-scope-ownership-graph`, `cpt-cf-resource-group-fr-dual-auth-modes` _(p2 — deferred, not implemented yet)_
 
 **Principles**: `cpt-cf-resource-group-principle-tenant-scope-ownership-graph`, `cpt-cf-resource-group-principle-barrier-as-data`
 
@@ -57,8 +58,8 @@ This feature bridges RG with the AuthZ ecosystem. The integration read port prov
 
 | Actor | Role in Feature |
 |-------|-----------------|
-| `cpt-cf-resource-group-actor-authz-plugin-consumer` | Reads hierarchy data via `ResourceGroupReadHierarchy` (MTLS or in-process ClientHub) |
-| `cpt-cf-resource-group-actor-instance-administrator` | Configures MTLS settings, manages tenant hierarchy |
+| `cpt-cf-resource-group-actor-authz-plugin-consumer` | Reads hierarchy data via `ResourceGroupReadHierarchy` (in-process via `ClientHub`; MTLS path is `p2` — deferred / not implemented yet) |
+| `cpt-cf-resource-group-actor-instance-administrator` | Manages tenant hierarchy. _Configures MTLS settings: `p2` — deferred, not implemented yet._ |
 | `cpt-cf-resource-group-actor-tenant-administrator` | Operates within tenant scope; JWT-authenticated requests go through AuthZ |
 | `cpt-cf-resource-group-actor-apps` | General consumers using `ResourceGroupClient` via JWT |
 
@@ -91,16 +92,41 @@ This feature bridges RG with the AuthZ ecosystem. The integration read port prov
 2. [x] - `p1` - API Gateway: authenticate JWT via AuthNResolverClient → SecurityContext {subject_id, subject_tenant_id} - `inst-jwt-2`
 3. [x] - `p1` - RG Gateway: call PolicyEnforcer.access_scope(ctx, resource_type, action) - `inst-jwt-3`
 4. [x] - `p1` - PolicyEnforcer → AuthZ Resolver: evaluate(EvaluationRequest) - `inst-jwt-4`
-5. [x] - `p1` - AuthZ plugin internally: call ResourceGroupReadHierarchy.list_group_depth() for tenant hierarchy resolution (via MTLS or in-process ClientHub — bypasses AuthZ) - `inst-jwt-5`
+5. [x] - `p1` - AuthZ plugin internally: call ResourceGroupReadHierarchy.list_group_depth() for tenant hierarchy resolution (in-process via `ClientHub` — bypasses AuthZ to break the circular dependency; the MTLS transport variant is `p2` — deferred, not implemented yet) - `inst-jwt-5`
 6. [x] - `p1` - AuthZ plugin: produce constraints (e.g., owner_tenant_id IN (...)) - `inst-jwt-6`
 7. [x] - `p1` - PolicyEnforcer: compile_to_access_scope() → AccessScope - `inst-jwt-7`
 8. [x] - `p1` - RG Gateway: apply AccessScope via SecureORM (WHERE tenant_id IN (...)) to query - `inst-jwt-8`
 9. [x] - `p1` - RG Service: execute query with SQL predicates, return results - `inst-jwt-9`
 10. [x] - `p1` - **RETURN** response to actor - `inst-jwt-10`
 
-### MTLS Request from AuthZ Plugin
+### In-Process Hierarchy Read by AuthZ Plugin
 
-- [x] `p1` - **ID**: `cpt-cf-resource-group-flow-integration-auth-mtls-request`
+- [x] `p1` - **ID**: `cpt-cf-resource-group-flow-integration-auth-plugin-read`
+
+**Actor**: `cpt-cf-resource-group-actor-authz-plugin-consumer`
+
+**Success Scenarios**:
+- AuthZ plugin reads hierarchy data via the in-process `ResourceGroupReadHierarchy` trait registered in `ClientHub`; AuthZ evaluation is bypassed by construction (the plugin cannot evaluate itself)
+
+**Error Scenarios**:
+- Group not found (or inaccessible root) → domain not-found error surfaced by `RgReadService` (mirrors `GroupService::get_group_descendants` / `get_group_ancestors`, which perform a scope-aware preflight lookup and map missing/cross-tenant root to `GroupNotFound` → HTTP 404 on the REST path)
+- DB unavailable → infrastructure error surfaced via `DomainError::Database`
+
+**Steps**:
+1. [x] - `p1` - AuthZ plugin resolves `dyn ResourceGroupReadHierarchy` from `ClientHub` - `inst-plugin-read-1`
+2. [x] - `p1` - Plugin invokes `list_group_depth(system_ctx, group_id, query)` - `inst-plugin-read-2`
+3. [x] - `p1` - `RgReadService` delegates to `GroupService` unscoped read methods (`AccessScope::allow_all()`) — no AuthZ evaluation - `inst-plugin-read-3`
+4. [x] - `p1` - `GroupService` executes the closure-table query against the RG database - `inst-plugin-read-4`
+5. [x] - `p1` - **RETURN** `Page<ResourceGroupWithDepth>` — hierarchy rows with `tenant_id` per group and `metadata` (including `self_managed`); the trait surface restricts the plugin to hierarchy-only operations - `inst-plugin-read-5`
+
+### MTLS Request from AuthZ Plugin (`p2` — deferred, not implemented yet)
+
+- [ ] `p2` - **ID**: `cpt-cf-resource-group-flow-integration-auth-mtls-request`
+
+> **Status: `p2` — designed, not implemented yet.** Planned for a future
+> microservice deployment that splits the AuthZ plugin out of the RG
+> process. The current monolith uses the in-process flow above; do not
+> implement this path in the current iteration.
 
 **Actor**: `cpt-cf-resource-group-actor-authz-plugin-consumer`
 
@@ -113,16 +139,16 @@ This feature bridges RG with the AuthZ ecosystem. The integration read port prov
 - Endpoint not in MTLS allowlist → 403 Forbidden
 
 **Steps**:
-1. [x] - `p1` - AuthZ plugin sends GET /api/resource-group/v1/groups/{group_id}/hierarchy with MTLS client certificate - `inst-mtls-1`
-2. [x] - `p1` - RG Gateway: extract client certificate from TLS handshake - `inst-mtls-2`
-3. [x] - `p1` - Validate certificate against trusted CA bundle (ca_cert): chain, expiration, revocation - `inst-mtls-3`
-4. [x] - `p1` - Match client identity (certificate CN/SAN) against allowed_clients list - `inst-mtls-4`
-5. [x] - `p1` - **IF** client not in allowed_clients → **RETURN** 403 Forbidden - `inst-mtls-5`
-6. [x] - `p1` - Check endpoint against allowed_endpoints allowlist (method + path) - `inst-mtls-6`
-7. [x] - `p1` - **IF** endpoint not in allowlist → **RETURN** 403 Forbidden - `inst-mtls-7`
-8. [x] - `p1` - Create system SecurityContext (no AuthZ evaluation — trusted system principal) - `inst-mtls-8`
-9. [x] - `p1` - RG Hierarchy Service: execute list_group_depth(system_ctx, group_id, query) directly - `inst-mtls-9`
-10. [x] - `p1` - **RETURN** Page<ResourceGroupWithDepth> — hierarchy data with tenant_id per group, metadata including `self_managed` - `inst-mtls-10`
+1. [ ] - `p2` - AuthZ plugin sends GET /api/resource-group/v1/groups/{group_id}/hierarchy with MTLS client certificate - `inst-mtls-1`
+2. [ ] - `p2` - RG Gateway: extract client certificate from TLS handshake - `inst-mtls-2`
+3. [ ] - `p2` - Validate certificate against trusted CA bundle (ca_cert): chain, expiration, revocation - `inst-mtls-3`
+4. [ ] - `p2` - Match client identity (certificate CN/SAN) against allowed_clients list - `inst-mtls-4`
+5. [ ] - `p2` - **IF** client not in allowed_clients → **RETURN** 403 Forbidden - `inst-mtls-5`
+6. [ ] - `p2` - Check endpoint against allowed_endpoints allowlist (method + path) - `inst-mtls-6`
+7. [ ] - `p2` - **IF** endpoint not in allowlist → **RETURN** 403 Forbidden - `inst-mtls-7`
+8. [ ] - `p2` - Create system SecurityContext (no AuthZ evaluation — trusted system principal) - `inst-mtls-8`
+9. [ ] - `p2` - RG Hierarchy Service: execute list_group_depth(system_ctx, group_id, query) directly - `inst-mtls-9`
+10. [ ] - `p2` - **RETURN** Page<ResourceGroupWithDepth> — hierarchy data with tenant_id per group, metadata including `self_managed` - `inst-mtls-10`
 
 ### Plugin Gateway Routing
 
@@ -161,22 +187,27 @@ This feature bridges RG with the AuthZ ecosystem. The integration read port prov
 5. [x] - `p1` - **IF** tenant-incompatible → **RETURN** TenantIncompatibility with tenant details - `inst-tenant-enforce-5`
 6. [x] - `p1` - **RETURN** pass - `inst-tenant-enforce-6`
 
-### Authentication Mode Decision
+### Authentication Mode Decision (`p2` — deferred, not implemented yet)
 
-- [x] `p1` - **ID**: `cpt-cf-resource-group-algo-integration-auth-auth-mode-decision`
+- [ ] `p2` - **ID**: `cpt-cf-resource-group-algo-integration-auth-auth-mode-decision`
+
+> **Status: `p2` — applies only when the deferred MTLS path lands in a
+> future microservice deployment. The current monolith only handles the
+> JWT branch (and the in-process plugin read path which does not flow
+> through this decision).**
 
 **Input**: Incoming request with authentication credentials
 
 **Output**: Authentication mode (JWT or MTLS) and resulting SecurityContext
 
 **Steps**:
-1. [x] - `p1` - Inspect request for authentication method - `inst-auth-decide-1`
-2. [x] - `p1` - **IF** request has MTLS client certificate - `inst-auth-decide-2`
-   1. [x] - `p1` - Verify certificate against CA bundle - `inst-auth-decide-2a`
-   2. [x] - `p1` - Match CN against allowed_clients - `inst-auth-decide-2b`
-   3. [x] - `p1` - Check endpoint in MTLS allowlist - `inst-auth-decide-2c`
-   4. [x] - `p1` - **IF** all checks pass → create system SecurityContext, skip AuthZ → **RETURN** MTLS mode - `inst-auth-decide-2d`
-   5. [x] - `p1` - **ELSE** → **RETURN** 403 Forbidden - `inst-auth-decide-2e`
+1. [ ] - `p2` - Inspect request for authentication method - `inst-auth-decide-1`
+2. [ ] - `p2` - **IF** request has MTLS client certificate - `inst-auth-decide-2`
+   1. [ ] - `p2` - Verify certificate against CA bundle - `inst-auth-decide-2a`
+   2. [ ] - `p2` - Match CN against allowed_clients - `inst-auth-decide-2b`
+   3. [ ] - `p2` - Check endpoint in MTLS allowlist - `inst-auth-decide-2c`
+   4. [ ] - `p2` - **IF** all checks pass → create system SecurityContext, skip AuthZ → **RETURN** MTLS mode - `inst-auth-decide-2d`
+   5. [ ] - `p2` - **ELSE** → **RETURN** 403 Forbidden - `inst-auth-decide-2e`
 3. [x] - `p1` - **IF** request has JWT bearer token - `inst-auth-decide-3`
    1. [x] - `p1` - Authenticate via AuthNResolverClient → SecurityContext - `inst-auth-decide-3a`
    2. [x] - `p1` - Run PolicyEnforcer.access_scope() → AccessScope - `inst-auth-decide-3b`
@@ -200,7 +231,7 @@ The system **MUST** implement an Integration Read Service that exposes `Resource
 - Responses are policy-agnostic: no AuthZ decisions, no SQL fragments, no constraint objects
 - Plugin gateway routing: resolve configured provider (built-in vs vendor-specific), delegate with SecurityContext passthrough
 - In-process mode (monolith): direct ClientHub call, no network auth needed
-- Out-of-process mode (microservices): MTLS-authenticated remote call
+- Out-of-process mode (microservices): MTLS-authenticated remote call _(p2 — deferred, not implemented yet)_
 - SecurityContext propagated without policy interpretation across gateway layer
 
 **Implements**:
@@ -209,17 +240,33 @@ The system **MUST** implement an Integration Read Service that exposes `Resource
 **Touches**:
 - Entities: `ResourceGroupWithDepth`, `ResourceGroupMembership`
 
-### Dual Authentication Mode Routing
+### JWT Authentication Routing
 
-- [x] `p1` - **ID**: `cpt-cf-resource-group-dod-integration-auth-dual-auth`
+- [x] `p1` - **ID**: `cpt-cf-resource-group-dod-integration-auth-jwt`
 
-The system **MUST** implement dual authentication mode routing in the RG gateway.
+The system **MUST** authenticate every public RG REST/gRPC endpoint via JWT and run AuthZ evaluation.
 
 **JWT mode (all endpoints)**:
 - Authenticate via AuthNResolverClient → SecurityContext
 - Run PolicyEnforcer.access_scope() for AuthZ evaluation
 - Apply AccessScope via SecureORM to all queries
 - Identical flow to any other domain service (courses, users, etc.)
+
+**Implements**:
+- `cpt-cf-resource-group-flow-integration-auth-jwt-request`
+- `cpt-cf-resource-group-flow-integration-auth-plugin-read`
+
+**Touches**:
+- API: all RG REST endpoints (JWT)
+
+### Dual Authentication Mode Routing (`p2` — deferred, not implemented yet)
+
+- [ ] `p2` - **ID**: `cpt-cf-resource-group-dod-integration-auth-dual-auth`
+
+> **Status: `p2` — designed, not implemented yet.** Planned for the
+> future microservice split. Do not implement in the current iteration.
+
+The system **WILL** additionally implement an MTLS authentication mode in the RG gateway when the AuthZ plugin is split out of the RG process.
 
 **MTLS mode (hierarchy endpoint only)**:
 - Verify client certificate against trusted CA bundle
@@ -235,12 +282,11 @@ The system **MUST** implement dual authentication mode routing in the RG gateway
 - `allowed_endpoints`: list of method+path pairs (e.g., `GET /api/resource-group/v1/groups/{group_id}/hierarchy`)
 
 **Implements**:
-- `cpt-cf-resource-group-flow-integration-auth-jwt-request`
-- `cpt-cf-resource-group-flow-integration-auth-mtls-request`
-- `cpt-cf-resource-group-algo-integration-auth-auth-mode-decision`
+- `cpt-cf-resource-group-flow-integration-auth-mtls-request` _(p2)_
+- `cpt-cf-resource-group-algo-integration-auth-auth-mode-decision` _(p2)_
 
 **Touches**:
-- API: `GET /api/resource-group/v1/groups/{group_id}/hierarchy` (JWT + MTLS), all other endpoints (JWT only)
+- API: `GET /api/resource-group/v1/groups/{group_id}/hierarchy` (additionally over MTLS)
 
 ### Tenant Scope Enforcement for Ownership-Graph Profile
 
@@ -266,8 +312,8 @@ The system **MUST** enforce tenant-hierarchy-compatible writes in ownership-grap
 - [x] `p1` - **ID**: `cpt-cf-resource-group-dod-testing-integration-auth`
 
 In-source `#[cfg(test)]` tests covering auth-mode decision and tenant-scope enforcement:
-- Auth mode decision: JWT path dispatches to PolicyEnforcer; MTLS path bypasses AuthZ with system SecurityContext
-- MTLS validation: valid CN in allowed_clients passes; unknown CN returns 403; expired certificate returns 403; endpoint not in allowlist returns 403
+- Auth mode decision: JWT path dispatches to PolicyEnforcer (`p1`); MTLS path bypasses AuthZ with system SecurityContext (`p2` — deferred, not implemented yet)
+- MTLS validation (`p2` — deferred, not implemented yet): valid CN in allowed_clients passes; unknown CN returns 403; expired certificate returns 403; endpoint not in allowlist returns 403
 - Tenant-scope enforcement: compatible tenant passes; incompatible tenant returns TenantIncompatibility; platform-admin provisioning exception bypasses caller scope but enforces data invariants
 - Integration read service: policy-agnostic response (no AuthZ fields in output); plugin gateway routes to built-in vs vendor-specific provider
 
@@ -276,17 +322,17 @@ In-source `#[cfg(test)]` tests covering auth-mode decision and tenant-scope enfo
 - [x] AuthZ plugin resolves `dyn ResourceGroupReadHierarchy` from ClientHub and successfully calls `list_group_depth`
 - [x] Integration read responses include `tenant_id` per group and `metadata` (including `self_managed`) but no AuthZ decision fields
 - [x] JWT request to any RG endpoint goes through AuthN → AuthZ (PolicyEnforcer) → AccessScope → SecureORM pipeline
-- [x] MTLS request to `/groups/{group_id}/hierarchy` bypasses AuthZ and returns hierarchy data
-- [x] MTLS request to any other endpoint (e.g., `POST /groups`) returns 403 Forbidden
-- [x] MTLS request with invalid certificate returns 403 Forbidden
-- [x] MTLS request with valid certificate but client CN not in allowed_clients returns 403 Forbidden
+- [ ] _(p2 — deferred, not implemented yet)_ MTLS request to `/groups/{group_id}/hierarchy` bypasses AuthZ and returns hierarchy data
+- [ ] _(p2 — deferred, not implemented yet)_ MTLS request to any other endpoint (e.g., `POST /groups`) returns 403 Forbidden
+- [ ] _(p2 — deferred, not implemented yet)_ MTLS request with invalid certificate returns 403 Forbidden
+- [ ] _(p2 — deferred, not implemented yet)_ MTLS request with valid certificate but client CN not in allowed_clients returns 403 Forbidden
 - [x] Plugin gateway routes to built-in provider by default; routes to vendor-specific plugin when configured
 - [x] SecurityContext is passed through gateway to provider without policy interpretation
 - [x] Parent-child edge in ownership-graph profile with incompatible tenants is rejected with TenantIncompatibility
 - [x] Platform-admin provisioning call bypasses caller tenant scoping but still validates data invariants
 - [x] Group with `metadata.self_managed = true` is stored and returned in API responses — RG does not filter based on barrier
 - [x] In monolith deployment, AuthZ plugin uses ClientHub direct call (no MTLS needed)
-- [x] In microservice deployment, AuthZ plugin uses MTLS-authenticated remote call to hierarchy endpoint
+- [ ] _(p2 — deferred, not implemented yet)_ In microservice deployment, AuthZ plugin uses MTLS-authenticated remote call to hierarchy endpoint
 
 ---
 
@@ -294,14 +340,18 @@ In-source `#[cfg(test)]` tests covering auth-mode decision and tenant-scope enfo
 
 ### Auth Mode Decision
 
-| TC | Scenario | Assert |
-|----|----------|--------|
-| TC-AUTH-01 | Request with valid MTLS cert + CN in allowed_clients + endpoint in allowlist | system SecurityContext created, AuthZ bypassed |
-| TC-AUTH-02 | Request with valid MTLS cert but CN not in allowed_clients | Returns 403 Forbidden |
-| TC-AUTH-03 | Request with expired MTLS certificate | Returns 403 Forbidden |
-| TC-AUTH-04 | MTLS request to endpoint not in allowed_endpoints | Returns 403 Forbidden |
-| TC-AUTH-05 | Request with JWT bearer token | AuthNResolverClient called, PolicyEnforcer evaluated |
-| TC-AUTH-06 | Request with no credentials | Returns 401 Unauthorized |
+> TC-AUTH-01..04 are scoped to the deferred MTLS path (`p2` — not
+> implemented yet) and are kept here as a forward-looking specification.
+> Only TC-AUTH-05 and TC-AUTH-06 must pass in the current iteration.
+
+| TC | Priority | Scenario | Assert |
+|----|----------|----------|--------|
+| TC-AUTH-01 | `p2` (deferred) | Request with valid MTLS cert + CN in allowed_clients + endpoint in allowlist | system SecurityContext created, AuthZ bypassed |
+| TC-AUTH-02 | `p2` (deferred) | Request with valid MTLS cert but CN not in allowed_clients | Returns 403 Forbidden |
+| TC-AUTH-03 | `p2` (deferred) | Request with expired MTLS certificate | Returns 403 Forbidden |
+| TC-AUTH-04 | `p2` (deferred) | MTLS request to endpoint not in allowed_endpoints | Returns 403 Forbidden |
+| TC-AUTH-05 | `p1` | Request with JWT bearer token | AuthNResolverClient called, PolicyEnforcer evaluated |
+| TC-AUTH-06 | `p1` | Request with no credentials | Returns 401 Unauthorized |
 
 ### Tenant Scope Enforcement
 

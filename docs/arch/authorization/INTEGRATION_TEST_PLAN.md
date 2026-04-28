@@ -3,7 +3,7 @@
 
 # AuthZ + Resource Group Integration Test Plan
 
-Design-time test plan for verifying the RG ↔ AuthZ interaction locally in hyperspot-server. Covers three phases: tenant scoping, group-based predicates, and MTLS bypass.
+Design-time test plan for verifying the RG ↔ AuthZ interaction locally in hyperspot-server. Covers three phases: tenant scoping (`p1`), group-based predicates (`p1`), and MTLS bypass (`p2` — deferred, not implemented yet).
 
 For background on how AuthZ uses RG data, see [RESOURCE_GROUP_MODEL.md](./RESOURCE_GROUP_MODEL.md). For concrete SQL-level scenarios, see [AUTHZ_USAGE_SCENARIOS.md](./AUTHZ_USAGE_SCENARIOS.md) scenarios S14–S21.
 
@@ -207,7 +207,13 @@ WHERE owner_tenant_id IN ('T1')
 
 ---
 
-## Phase 3: MTLS Authentication Mode _(Planned)_
+## Phase 3: MTLS Authentication Mode (`p2` — deferred, not implemented yet)
+
+> **Status: `p2` — designed, not implemented yet.** Phase 3 is reserved
+> for the future microservice split that moves the AuthZ plugin out of
+> the RG process. Do not run/implement this phase in the current
+> iteration; the in-process `ResourceGroupReadHierarchy` path covers the
+> AuthZ ↔ RG dependency in the monolith.
 
 **Goal**: Verify that AuthZ plugin can read RG hierarchy via MTLS-authenticated request (microservice deployment mode), bypassing AuthZ evaluation.
 
@@ -361,11 +367,11 @@ python3 scripts/ci.py e2e-local --config config/e2e-tr-authz.yaml -- -k "resourc
 
 ## Effort Estimate
 
-| Phase | Scope | Effort | Status |
-|-------|-------|--------|--------|
-| Phase 1 | Tenant scoping via PolicyEnforcer | 2–3 hours | **Planned** |
-| Phase 2 | Group predicates (in_group/in_group_subtree) | 1–2 days | **Planned** |
-| Phase 3 | MTLS verification | 2–3 hours | **Planned** |
+| Phase | Scope | Effort | Priority | Status |
+|-------|-------|--------|----------|--------|
+| Phase 1 | Tenant scoping via PolicyEnforcer | 2–3 hours | `p1` | **Planned** |
+| Phase 2 | Group predicates (in_group/in_group_subtree) | 1–2 days | `p1` | **Planned** |
+| Phase 3 | MTLS verification | 2–3 hours | `p2` | **Deferred — not implemented yet** |
 
 ---
 

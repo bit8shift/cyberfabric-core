@@ -1,4 +1,5 @@
 // Created: 2026-04-16 by Constructor Tech
+// Updated: 2026-04-28 by Constructor Tech
 // @cpt-begin:cpt-cf-resource-group-dod-sdk-foundation-sdk-models:p1:inst-full
 // @cpt-dod:cpt-cf-resource-group-dod-sdk-foundation-sdk-models:p1
 //! SDK model types for the resource-group module.
@@ -153,19 +154,20 @@ pub struct CreateTypeRequest {
 }
 
 /// Request body for updating an existing GTS type (full replacement via PUT).
+///
+/// Every replaceable field is **required** so an omitted field cannot be
+/// confused with "preserve previous value". Nullable fields
+/// (`metadata_schema`) must be sent explicitly as `null` to clear them.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateTypeRequest {
     /// Whether groups of this type can be root nodes.
     pub can_be_root: bool,
     /// GTS type paths of allowed parent types.
-    #[serde(default)]
     pub allowed_parent_types: Vec<String>,
     /// GTS type paths of allowed membership resource types.
-    #[serde(default)]
     pub allowed_membership_types: Vec<String>,
-    /// Optional JSON Schema for instance metadata.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// JSON Schema for instance metadata (`null` to clear).
     pub metadata_schema: Option<serde_json::Value>,
 }
 
@@ -266,13 +268,12 @@ pub struct CreateGroupRequest {
 pub struct UpdateGroupRequest {
     /// Display name (1..255 characters).
     pub name: String,
-    /// Parent group ID (null for root groups). Reparenting is allowed only
+    /// Parent group ID (`null` for root groups). Reparenting is allowed only
     /// within the same tenant scope; cross-tenant moves are rejected by the
-    /// service layer.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// service layer. Send explicit `null` to move a group to root — an
+    /// omitted key is rejected as a malformed payload.
     pub parent_id: Option<Uuid>,
-    /// Type-specific metadata.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// Type-specific metadata (`null` to clear).
     pub metadata: Option<serde_json::Value>,
 }
 
