@@ -1,4 +1,5 @@
 // Created: 2026-04-16 by Constructor Tech
+// Updated: 2026-04-29 by Constructor Tech
 // @cpt-dod:cpt-cf-resource-group-dod-sdk-foundation-rest-odata:p1
 //! Infrastructure layer mapping from type-safe `FilterNode` to `SeaORM` Conditions.
 //!
@@ -54,6 +55,7 @@ impl FieldToColumn<GroupFilterField> for GroupODataMapper {
         match field {
             GroupFilterField::Type => GroupColumn::GtsTypeId,
             GroupFilterField::HierarchyParentId => GroupColumn::ParentId,
+            GroupFilterField::TenantId => GroupColumn::TenantId,
             GroupFilterField::Id => GroupColumn::Id,
             GroupFilterField::Name => GroupColumn::Name,
         }
@@ -71,6 +73,7 @@ impl ODataFieldMapping<GroupFilterField> for GroupODataMapper {
                 Some(pid) => sea_orm::Value::Uuid(Some(Box::new(pid))),
                 None => sea_orm::Value::Uuid(None),
             },
+            GroupFilterField::TenantId => sea_orm::Value::Uuid(Some(Box::new(model.tenant_id))),
             GroupFilterField::Type => sea_orm::Value::SmallInt(Some(model.gts_type_id)),
         }
     }
@@ -135,3 +138,7 @@ impl ODataFieldMapping<MembershipFilterField> for MembershipODataMapper {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "odata_mapper_tests.rs"]
+mod tests;
